@@ -13,6 +13,7 @@ develop-eggs/
 dist/
 downloads/
 eggs/
+data/
 .eggs/
 lib/
 lib64/
@@ -205,3 +206,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+CLAUDE.md 
+.venv
+uv.lock
+

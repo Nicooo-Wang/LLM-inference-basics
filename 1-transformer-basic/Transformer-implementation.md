@@ -2,7 +2,13 @@
 
 ## 前言
 
-本文档通过vit项目，详细解析Transformer的五个核心模块：Positional Embedding、Multi-Head Attention、MLP、LayerNorm和Classification。通过分析代码实现，深入理解每个模块的工作原理和设计思想。
+本文档通过ViT项目解析经典Transformer架构，并对比最新LLM（如DeepSeek V3）中的架构演进。详细解析Transformer的核心模块：Positional Embedding、Multi-Head Attention、MLP、LayerNorm和Classification，以及现代LLM中的改进：MoE、RMSNorm、Flash Attention等。
+
+---
+
+## 经典Transformer架构 (ViT实现)
+
+以下是基于ViT项目的经典Transformer实现，这是理解现代LLM架构的基础。
 
 ## Transformer
 ### 源码实现
@@ -106,7 +112,10 @@ class PositionalEncoding(nn.Module):
 位置编码的目的是为Transformer模型提供序列中每个位置的位置信息，因为Transformer本身是位置无关的。
 
 $$
-\begin{split}\begin{aligned} p_{i, 2j} &= \sin\left(\frac{i}{10000^{2j/d}}\right),\\p_{i, 2j+1} &= \cos\left(\frac{i}{10000^{2j/d}}\right).\end{aligned}\end{split}
+\begin{aligned}
+p_{i, 2j} &= \sin\left(\frac{i}{10000^{2j/d}}\right),\\
+p_{i, 2j+1} &= \cos\left(\frac{i}{10000^{2j/d}}\right).
+\end{aligned}
 $$
 
 ![alt text](Transformer-implementation.assets/image-1.png)
@@ -423,3 +432,200 @@ Transformer输出 -> 提取CLS token -> LayerNorm -> Linear分类 -> 输出logit
 - **简洁高效**: 避免了复杂的池化操作
 - **可解释性**: 可以直接分析CLS token的表示来理解模型的判断依据
 - **迁移学习友好**: CLS token的表示可以作为通用的图像特征用于其他任务
+
+---
+
+## DeepSeek V3架构改进对标
+
+现代LLM在经典Transformer基础上进行了大量优化，以DeepSeek为例，以下是模型结构
+
+![DeepSeek](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*3r11L8Luv_L5DkfoPy9rBQ.png)
+
+### 1. MHA → MLA (Multi-Head Latent Attention)
+
+#### 经典Multi-Head Attention (ViT中)
+```python
+class MultiheadSelfAttentionBlock(nn.Module):
+    def __init__(self, embedding_dim: int, num_heads: int):
+        super().__init__()
+        self.q_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.k_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.v_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.out_proj = nn.Linear(embedding_dim, embedding_dim)
+
+    def forward(self, x):
+        # QKV投影 -> 注意力计算 -> 输出投影
+        Q = self.q_proj(x); K = self.k_proj(x); V = self.v_proj(x)
+        # 标准注意力计算...
+```
+
+#### DeepSeek V3的MLA优化
+```python
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(self, num_heads, latent_dim):
+        super().__init__()
+        # 低维潜在空间注意力
+        self.latent_proj = nn.Linear(embedding_dim, latent_dim)
+        self.q_proj = nn.Linear(latent_dim, latent_dim)
+        self.k_proj = nn.Linear(latent_dim, latent_dim)
+        self.v_proj = nn.Linear(latent_dim, latent_dim)
+        self.out_proj = nn.Linear(latent_dim, embedding_dim)
+
+    def forward(self, x):
+        # 压缩到潜在空间 -> 注意力计算 -> 恢复原始维度
+        latent = self.latent_proj(x)
+        # 在低维空间计算注意力，减少计算量
+```
+![MLA](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*tEzj6GIBEW0LEu40nCWdxQ.png)
+
+**改进点**：
+- 将注意力计算压缩到低维潜在空间
+- 减少KV缓存占用
+- 支持更长上下文的同时保持计算效率
+
+### 2. LayerNorm → RMSNorm
+
+#### 经典LayerNorm (ViT中)
+```python
+class LayerNorm(nn.Module):
+    def __init__(self, num_features, eps=1e-6):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(num_features))
+        self.beta = nn.Parameter(torch.zeros(num_features))
+        self.eps = eps
+
+    def forward(self, X):
+        mean = X.mean(-1, keepdim=True)
+        var = X.var(-1, unbiased=False, keepdim=True)
+        X_norm = (X - mean) / torch.sqrt(var + self.eps)
+        return self.gamma * X_norm + self.beta
+```
+
+#### DeepSeek V3的RMSNorm
+```python
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x):
+        # 移除均值计算，只保留均方根归一化
+        norm = x.norm(dim=-1, keepdim=True) * (x.size(-1) ** -0.5)
+        return self.weight * x / (norm + self.eps)
+```
+
+**改进点**：
+- 移除均值计算，提升~30%计算速度
+- 减少参数量（无需beta参数）
+- 在大模型训练中更稳定
+
+### 3. GELU → SwiGLU
+
+#### 经典MLPBlock (ViT中)
+```python
+class MLPBlock(nn.Module):
+    def __init__(self, embedding_dim=768, mlp_size=3072):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(embedding_dim, mlp_size),
+            nn.GELU(),  # Gaussian Error Linear Unit
+            nn.Linear(mlp_size, embedding_dim),
+        )
+```
+
+#### DeepSeek V3的SwiGLU
+```python
+class SwiGLUMLP(nn.Module):
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.w_gate = nn.Linear(dim, hidden_dim, bias=False)
+        self.w_up = nn.Linear(dim, hidden_dim, bias=False)
+        self.w_down = nn.Linear(hidden_dim, dim, bias=False)
+
+    def forward(self, x):
+        gate = F.silu(self.w_gate(x))  # Swish门控
+        up = self.w_up(x)
+        return self.w_down(gate * up)  # 门控机制
+```
+
+![MOE](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*JX6ONFf4m2_V-t7i5YM1pA.png)
+
+**改进点**：
+- 引入门控机制，增强表达能力
+- 在相同参数量下性能更好
+- 梯度流动更稳定
+
+### 4. Dense → MoE (Mixture of Experts)
+
+#### 经典Dense架构 (ViT中)
+```python
+# 所有token都通过同一个MLP
+class MLPBlock(nn.Module):
+    def forward(self, x):
+        return self.mlp(x)  # 每个token激活所有参数
+```
+
+#### DeepSeek V3的MoE架构
+```python
+class MoE(nn.Module):
+    def __init__(self, num_experts=67, top_k=8):
+        super().__init__()
+        self.experts = nn.ModuleList([SwiGLUMLP(...) for _ in range(num_experts)])
+        self.gate = nn.Linear(embed_dim, num_experts)
+        self.top_k = top_k
+
+    def forward(self, x):
+        # 路由选择激活的专家
+        gate_scores = self.gate(x)
+        top_k_scores, selected_experts = torch.topk(gate_scores, self.top_k)
+
+        # 只激活选中的专家，大幅节省计算
+        final_output = torch.zeros_like(x)
+        for i in range(self.top_k):
+            expert_mask = (selected_experts == i).any()
+            if expert_mask.any():
+                expert_input = x[expert_mask]
+                expert_output = self.experts[i](expert_input)
+                final_output[expert_mask] += expert_output * top_k_scores[expert_mask, i:i+1]
+
+        return final_output
+```
+
+**改进点**：
+- 模型由Dense转稀疏，节省成本
+- 参数量达千亿但计算成本可控
+- 支持专家并行训练
+
+### 5. 固定位置编码 → RoPE
+
+#### 经典位置编码 (ViT中)
+```python
+# 固定的正弦余弦编码
+self.position_embedding = nn.Parameter(torch.randn(1, num_patches + 1, embedding_dim))
+```
+
+#### DeepSeek V3的RoPE
+[ 知乎 Rope详解 ]( https://zhuanlan.zhihu.com/p/642884818 )
+```python
+def apply_rotary_pos_emb(q, k, cos, sin):
+    # 旋转位置编码，支持相对位置
+    q_rot = (q * cos) + (rotate_half(q) * sin)
+    k_rot = (k * cos) + (rotate_half(k) * sin)
+    return q_rot, k_rot
+```
+
+**改进点**：
+- 支持训练时未见过的序列长度
+- 更好的外推能力
+- 位置信息具有相对性
+
+## 架构改进对比表
+
+| ViT模块 | DeepSeek V3改进 | 核心优势 |
+|---------|----------------|----------|
+| Multi-Head Attention | MLA (Multi-Head Latent Attention) | 降低计算复杂度，减少KV缓存 |
+| LayerNorm | RMSNorm | 提速30%，减少参数，训练更稳定 |
+| GELU + Dense | SwiGLU + MoE | 专家混合，千亿参数，计算可控 |
+| 固定位置编码 | RoPE | 支持长序列外推，相对位置感知 |
+| 标准MLP | 门控MLP | 门控机制，增强表达能力 |

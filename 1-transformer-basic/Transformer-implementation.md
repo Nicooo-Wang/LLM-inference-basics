@@ -104,6 +104,7 @@ class PositionalEncoding(nn.Module):
 ### 工作原理
 
 位置编码的目的是为Transformer模型提供序列中每个位置的位置信息，因为Transformer本身是位置无关的。
+
 $$
 \begin{split}\begin{aligned} p_{i, 2j} &= \sin\left(\frac{i}{10000^{2j/d}}\right),\\p_{i, 2j+1} &= \cos\left(\frac{i}{10000^{2j/d}}\right).\end{aligned}\end{split}
 $$

@@ -139,6 +139,7 @@ $$
 - **唯一性**: 每个位置都有独特的编码表示
 - **泛化性**: 可以处理训练时未见过的序列长度
 
+![positional emb](https://github.com/Nicooo-Wang/LLM-inference-basics/raw/main/1-transformer-basic/Transformer-implementation.assets/image-1.png)
 ### 2. LayerNorm（层归一化）
 
 LayerNorm对每个样本的所有特征进行归一化，使得特征的均值为0，方差为1。然后通过可学习的参数γ（缩放）和β（偏移）来恢复数据的表示能力。
@@ -487,6 +488,9 @@ self.mlp = nn.Sequential(
 ```
 
 #### SwiGLU实现
+
+![gelu vs swiglu](https://machinelearningmastery.com/wp-content/uploads/2025/06/activations.png)
+
 ```python
 class SwiGLUMLP(nn.Module):
     def __init__(self, dim, hidden_dim):
@@ -509,6 +513,9 @@ class SwiGLUMLP(nn.Module):
 | ReGLU | $(xW_1) \otimes \text{ReLU}(xW_2)$ | 计算简单，稀疏激活 |
 | GeGLU | $(xW_1) \otimes \text{GELU}(xW_2)$ | 平滑激活，概率建模 |
 | SwiGLU | $\text{Swish}(xW_1) \otimes (xW_2)$ | **最佳性能**，自适应门控 |
+![gated linear unit](https://miro.medium.com/v2/resize:fit:900/format:webp/1*9Ebd6nY2fvkjzoFdcvhE9g.png)
+
+>gated linear unit, 以sigmoid为例
 
 #### SwiGLU公式
 $$

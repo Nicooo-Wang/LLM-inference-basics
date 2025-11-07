@@ -551,7 +551,8 @@ pos_emb[:, 1::2] = torch.cos(position * div_term)
 #### RoPE (Rotary Position Embedding)
 
 **核心思想**：通过几何旋转编码位置，使点积只依赖相对位置。
-
+![WordEmb](https://substackcdn.com/image/fetch/$s_!BzlV!,w_1456,c_limit,f_webp,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F64da6027-b168-43ea-af22-aa2bfc594db0_1752x772.jpeg)
+![RoPE1](https://substackcdn.com/image/fetch/$s_!mDlb!,w_1456,c_limit,f_webp,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2F5bd4dbe2-f3d8-4831-b74a-5dae907362dc_1768x1352.png)
 ```python
 def apply_rotary_pos_emb(q, k, cos, sin):
     q_rot = (q * cos) + (rotate_half(q) * sin)

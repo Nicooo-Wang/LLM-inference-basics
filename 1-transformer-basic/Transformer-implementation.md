@@ -2,16 +2,19 @@
 
 ## 前言
 
-本文档通过ViT项目解析经典Transformer架构，并对比最新LLM（如DeepSeek V3）中的架构演进。详细解析Transformer的核心模块：Positional Embedding、Multi-Head Attention、MLP、LayerNorm和Classification，以及现代LLM中的改进：MoE、RMSNorm、Flash Attention等。
+本文档通过ViT项目解析经典Transformer架构，并对比最新LLM（如DeepSeek V3）中的架构演进。详细解析Transformer的核心模块：位置编码、多头注意力、MLP、LayerNorm和分类头，以及现代LLM中的改进：RoPE、SwiGLU、RMSNorm、MoE等。
 
 ---
 
 ## 经典Transformer架构 (ViT实现)
 
-以下是基于ViT项目的经典Transformer实现，这是理解现代LLM架构的基础。
+以下是基于ViT项目的经典Transformer实现，这是理解现代LLM架构的基础。ViT将Transformer架构成功应用于计算机视觉任务，为后续的多模态大模型奠定了基础。
 
-## Transformer
-### 源码实现
+### 整体架构图
+
+![transformer](https://towardsdatascience.com/wp-content/uploads/2021/01/147UCxMjpfJ2yo48fctNv-g.png)
+
+### 完整ViT实现
 
 ```python
 class ViT(nn.Module):
@@ -80,11 +83,24 @@ class ViT(nn.Module):
         x = self.classifier(x[:,0])
         return x
 ```
-![transformer](https://towardsdatascience.com/wp-content/uploads/2021/01/147UCxMjpfJ2yo48fctNv-g.png)
 
-## Positional Embedding（位置嵌入）
+### 关键组件说明
 
-### 源码实现
+- **Patch Embedding**: 将图像分割成16×16的patch，然后将每个patch线性投影到embedding空间
+- **Class Token**: 可学习的特殊token，用于聚合全局信息进行分类
+- **Position Embedding**: 为每个patch添加位置信息，使模型能够感知空间顺序
+- **Transformer Encoder**: 12层transformer块，每层包含多头注意力和MLP
+- **Classification Head**: 基于CLS token的最终分类层
+
+---
+
+## 核心模块详解
+
+### 1. 位置编码 (Positional Embedding)
+
+位置编码的目的是为Transformer模型提供序列中每个位置的位置信息，因为Transformer本身是位置无关的。通过不同频率的正弦余弦函数，为不同维度分配不同的位置感知能力。
+
+#### 源码实现
 
 在ViT项目中，位置嵌入的实现如下：
 
@@ -107,20 +123,28 @@ class PositionalEncoding(nn.Module):
         return self.dropout(X)
 ```
 
-### 工作原理
-
-位置编码的目的是为Transformer模型提供序列中每个位置的位置信息，因为Transformer本身是位置无关的。
+#### 数学公式
 
 $$
-\begin{aligned}
-p_{i, 2j} &= \sin\left(\frac{i}{10000^{2j/d}}\right),\\
-p_{i, 2j+1} &= \cos\left(\frac{i}{10000^{2j/d}}\right).
-\end{aligned}
+PE_{(pos,2i)} = \sin\left(\frac{pos}{10000^{2i/d_{model}}}\right)
+$$
+$$
+PE_{(pos,2i+1)} = \cos\left(\frac{pos}{10000^{2i/d_{model}}}\right)
 $$
 
-![alt text](Transformer-implementation.assets/image-1.png)
-### LayerNorm
+#### 工作原理
+
+- **低频维度**: 捕捉长距离的位置关系
+- **高频维度**: 捕捉短距离的位置细节
+- **唯一性**: 每个位置都有独特的编码表示
+- **泛化性**: 可以处理训练时未见过的序列长度
+
+### 2. LayerNorm（层归一化）
+
+LayerNorm对每个样本的所有特征进行归一化，使得特征的均值为0，方差为1。然后通过可学习的参数γ（缩放）和β（偏移）来恢复数据的表示能力。
+
 #### 源码实现
+
 ```python
 class LayerNorm(nn.Module):
     """
@@ -167,21 +191,27 @@ class LayerNorm(nn.Module):
         return self.gamma * X_norm + self.beta
 ```
 
-#### 工作原理
+#### 数学公式
 
-LayerNorm对每个样本的所有特征进行归一化，使得特征的均值为0，方差为1。然后通过可学习的参数γ（缩放）和β（偏移）来恢复数据的表示能力。
+$$
+\text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
+$$
 
-**公式**：
-```
-LayerNorm(x) = γ * (x - μ) / sqrt(σ² + ε) + β
-```
+其中：
+- $\mu = \frac{1}{n}\sum_{i=1}^{n}x_i$ (均值)
+- $\sigma^2 = \frac{1}{n}\sum_{i=1}^{n}(x_i - \mu)^2$ (方差)
+- $\gamma, \beta$ 为可学习参数
 
-**优势**：
-- 不依赖于batch大小，对小batch或单个样本也能正常工作
-- 训练和推理时行为一致
-- 对于RNN和Transformer等序列模型特别有效
+#### 优势
 
-### MultiHeadAttention
+- **不依赖batch大小**: 对小batch也能正常工作
+- **训练一致性**: 训练和推理时行为一致
+- **序列友好**: 特别适合RNN和Transformer等序列模型
+
+### 3. 多头注意力 (Multi-Head Attention)
+
+多头注意力机制是Transformer的核心创新，允许模型同时关注来自不同表示子空间的信息。
+
 #### 源码实现
 ```python
 class MultiHeadAttention(nn.Module):
@@ -335,9 +365,11 @@ Attention(Q,K,V) = softmax(QK^T / sqrt(d_k))V
 
 ![MHA2](https://substackcdn.com/image/fetch/$s_!Q6zJ!,w_1456,c_limit,f_webp,q_auto:good,fl_progressive:steep/https%3A%2F%2Fsubstack-post-media.s3.amazonaws.com%2Fpublic%2Fimages%2Fc1497d87-2b8c-45eb-b7b9-3a0a8ebe0d3d_1783x747.png)
 
-## MLP（多层感知机）
+### 4. MLP（多层感知机）
 
-### 源码实现
+MLP（多层感知机）在Transformer中作为每个位置的非线性变换模块，为模型提供强大的表达能力。
+
+#### 源码实现
 
 ```python
 class MLPBlock(nn.Module):
@@ -360,181 +392,101 @@ class MLPBlock(nn.Module):
         return x
 ```
 
-### 工作原理
+#### 结构组成详解
 
-MLP（多层感知机）在Transformer中作为每个位置的非线性变换模块，为模型提供强大的表达能力。
+1. **LayerNorm (前置归一化)**: 在MLP之前对输入进行归一化，确保稳定的梯度流动
+2. **扩展层**: 将维度从 `embedding_dim` 扩展到 `mlp_size` (通常4倍)
+3. **GELU激活函数**: Gaussian Error Linear Unit，相比ReLU更平滑
+4. **收缩层**: 将维度从 `mlp_size` 收缩回 `embedding_dim`
+5. **Dropout正则化**: 防止过拟合，提高泛化能力
 
-**结构组成**：
-1. **LayerNorm**: 先对输入进行层归一化，稳定训练
-2. **扩展层**: 将维度从 embedding_dim 扩展到 mlp_size（通常是4倍）
-3. **激活函数**: 使用GELU激活函数，提供非线性变换
-4. **收缩层**: 将维度从 mlp_size 收缩回 embedding_dim
-5. **Dropout**: 在两个线性层后都添加Dropout进行正则化
+#### 工作流程
 
-**工作流程**：
 ```
 输入 -> LayerNorm -> Linear(扩展) -> GELU -> Dropout -> Linear(收缩) -> Dropout -> 输出
 ```
 
-**作用**：
-- 提供非线性变换能力，增强模型的表达能力
-- 与注意力机制互补，注意力负责信息聚合，MLP负责特征变换
-- 通过扩展-收缩的结构增加模型的参数量和表达能力
+#### 设计理念与优势
 
-**设计理念**：
-- 维度扩展（通常是4倍）增加了模型的中间表示空间
-- GELU激活函数相比ReLU更平滑，有助于梯度流动
-- Dropout正则化防止过拟合
+- **扩展-收缩架构**: 通过中间层扩展增加模型容量，同时保持输入输出维度一致
+- **残差连接友好**: 与Transformer的残差连接完美配合
+- **计算平衡**: 扩展倍数(4x)在性能和计算成本间取得良好平衡
+- **非线性能力**: GELU激活提供强大的非线性建模能力
 
-## Classification（分类模块）
-
-### 源码实现
-
-```python
-class ViT(nn.Module):
-    def __init__(self, embedding_dim: int = 768, num_classes: int = 1000):
-        # 分类头设计
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(normalized_shape=embedding_dim),
-            nn.Linear(in_features=embedding_dim, out_features=num_classes),
-        )
-
-    def forward(self, x):
-        # ... 前面的Transformer处理
-        x = self.classifier(x[:, 0])  # 只使用CLS token进行分类
-        return x
-```
-
-### 工作原理
+### 5. 分类头 (Classification Head)
 
 分类模块是Vision Transformer的最后一环，负责将Transformer编码后的特征映射到最终的类别空间。
 
-**设计特点**：
-1. **CLS Token选择**: 只使用序列中的第一个token（CLS token）进行分类
-   - CLS token在训练过程中学会聚合全局信息
-   - 相比于对所有token取平均，CLS token能更好地捕获整体表示
+#### 源码实现
 
-2. **LayerNorm**: 对CLS token的表示进行归一化
-   - 确保输入到分类层的特征分布稳定
-   - 提高训练的稳定性和收敛速度
+```python
+class ClassificationHead(nn.Module):
+    def __init__(self, embedding_dim: int = 768, num_classes: int = 1000):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(normalized_shape=embedding_dim),
+            nn.Linear(embedding_dim, num_classes),
+        )
 
-3. **线性分类器**: 将embedding_dim维的特征映射到num_classes维
-   - 输出每个类别的logits
-   - 在训练时配合CrossEntropyLoss使用
+    def forward(self, x):
+        return self.classifier(x[:, 0])  # 只使用CLS token
+```
 
-**工作流程**：
+#### 设计特点
+
+1. **CLS Token选择**: 使用第一个token进行分类
+2. **LayerNorm**: 确保输入分布稳定
+3. **线性映射**: 输出类别logits
+
+#### 工作流程
+
 ```
 Transformer输出 -> 提取CLS token -> LayerNorm -> Linear分类 -> 输出logits
 ```
 
-**为什么使用CLS Token**：
-- **全局信息聚合**: CLS token通过自注意力机制与所有patch token交互，学习到全局表示
-- **简洁高效**: 避免了复杂的池化操作
-- **可解释性**: 可以直接分析CLS token的表示来理解模型的判断依据
-- **迁移学习友好**: CLS token的表示可以作为通用的图像特征用于其他任务
+#### 为什么使用CLS Token
 
----
+- **全局信息聚合**: 通过自注意力学会聚合全局信息
+- **简洁高效**: 避免复杂池化操作
+- **迁移学习友好**: 可作为通用图像特征
 
-## DeepSeek V3架构改进对标
+## 现代LLM架构改进 (DeepSeek V3对标)
 
-现代LLM在经典Transformer基础上进行了大量优化，以DeepSeek为例，以下是模型结构
+现代LLM在经典Transformer基础上进行了大量优化，以DeepSeek V3为例，以下是关键架构改进：
 
 ![DeepSeek](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*3r11L8Luv_L5DkfoPy9rBQ.png)
 
-### 1. MHA → MLA (Multi-Head Latent Attention)
+### 1. LayerNorm → RMSNorm
 
-#### 经典Multi-Head Attention (ViT中)
+#### 经典LayerNorm
+$$
+\text{LayerNorm}(x) = \gamma \cdot \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta
+$$
+
+#### RMSNorm改进
+$$
+\text{RMSNorm}(x) = \frac{x}{\sqrt{\text{RMS}(x)^2 + \epsilon}} \cdot g
+$$
+
+其中：$\text{RMS}(x) = \sqrt{\frac{1}{n}\sum_{i=1}^{n}x_i^2}$
+
+#### 核心改进
+- **计算效率提升~30%**: 移除均值计算
+- **参数量减少50%**: 无需偏移参数β
+- **训练稳定性**: 大模型训练中表现更稳定
+
+### 2. GELU → SwiGLU
+
+#### 经典MLPBlock
 ```python
-class MultiheadSelfAttentionBlock(nn.Module):
-    def __init__(self, embedding_dim: int, num_heads: int):
-        super().__init__()
-        self.q_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.k_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.v_proj = nn.Linear(embedding_dim, embedding_dim)
-        self.out_proj = nn.Linear(embedding_dim, embedding_dim)
-
-    def forward(self, x):
-        # QKV投影 -> 注意力计算 -> 输出投影
-        Q = self.q_proj(x); K = self.k_proj(x); V = self.v_proj(x)
-        # 标准注意力计算...
+self.mlp = nn.Sequential(
+    nn.Linear(embedding_dim, mlp_size),
+    nn.GELU(),
+    nn.Linear(mlp_size, embedding_dim),
+)
 ```
 
-#### DeepSeek V3的MLA优化
-```python
-class MultiHeadLatentAttention(nn.Module):
-    def __init__(self, num_heads, latent_dim):
-        super().__init__()
-        # 低维潜在空间注意力
-        self.latent_proj = nn.Linear(embedding_dim, latent_dim)
-        self.q_proj = nn.Linear(latent_dim, latent_dim)
-        self.k_proj = nn.Linear(latent_dim, latent_dim)
-        self.v_proj = nn.Linear(latent_dim, latent_dim)
-        self.out_proj = nn.Linear(latent_dim, embedding_dim)
-
-    def forward(self, x):
-        # 压缩到潜在空间 -> 注意力计算 -> 恢复原始维度
-        latent = self.latent_proj(x)
-        # 在低维空间计算注意力，减少计算量
-```
-![MLA](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*tEzj6GIBEW0LEu40nCWdxQ.png)
-
-**改进点**：
-- 将注意力计算压缩到低维潜在空间
-- 减少KV缓存占用
-- 支持更长上下文的同时保持计算效率
-
-### 2. LayerNorm → RMSNorm
-
-#### 经典LayerNorm (ViT中)
-```python
-class LayerNorm(nn.Module):
-    def __init__(self, num_features, eps=1e-6):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(num_features))
-        self.beta = nn.Parameter(torch.zeros(num_features))
-        self.eps = eps
-
-    def forward(self, X):
-        mean = X.mean(-1, keepdim=True)
-        var = X.var(-1, unbiased=False, keepdim=True)
-        X_norm = (X - mean) / torch.sqrt(var + self.eps)
-        return self.gamma * X_norm + self.beta
-```
-
-#### DeepSeek V3的RMSNorm
-```python
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x):
-        # 移除均值计算，只保留均方根归一化
-        norm = x.norm(dim=-1, keepdim=True) * (x.size(-1) ** -0.5)
-        return self.weight * x / (norm + self.eps)
-```
-
-**改进点**：
-- 移除均值计算，提升~30%计算速度
-- 减少参数量（无需beta参数）
-- 在大模型训练中更稳定
-
-### 3. GELU → SwiGLU
-
-#### 经典MLPBlock (ViT中)
-```python
-class MLPBlock(nn.Module):
-    def __init__(self, embedding_dim=768, mlp_size=3072):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(embedding_dim, mlp_size),
-            nn.GELU(),  # Gaussian Error Linear Unit
-            nn.Linear(mlp_size, embedding_dim),
-        )
-```
-
-#### DeepSeek V3的SwiGLU
+#### SwiGLU实现
 ```python
 class SwiGLUMLP(nn.Module):
     def __init__(self, dim, hidden_dim):
@@ -549,24 +501,101 @@ class SwiGLUMLP(nn.Module):
         return self.w_down(gate * up)  # 门控机制
 ```
 
-![MOE](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*JX6ONFf4m2_V-t7i5YM1pA.png)
+#### 门控线性单元家族
 
-**改进点**：
-- 引入门控机制，增强表达能力
-- 在相同参数量下性能更好
-- 梯度流动更稳定
+| 类型 | 公式 | 特点 |
+|------|------|------|
+| GLU | $(xW_1) \otimes \sigma(xW_2)$ | 经典门控，Sigmoid激活 |
+| ReGLU | $(xW_1) \otimes \text{ReLU}(xW_2)$ | 计算简单，稀疏激活 |
+| GeGLU | $(xW_1) \otimes \text{GELU}(xW_2)$ | 平滑激活，概率建模 |
+| SwiGLU | $\text{Swish}(xW_1) \otimes (xW_2)$ | **最佳性能**，自适应门控 |
+
+#### SwiGLU公式
+$$
+\text{SwiGLU}(x, W_1, W_2, W_3) = (\text{Swish}(xW_1) \otimes (xW_2))W_3
+$$
+
+其中：$\text{Swish}(x) = x \cdot \sigma(x)$
+
+#### 核心改进
+- **门控机制**: 动态控制信息流
+- **表达能力增强**: 学习复杂非线性变换
+- **梯度流动稳定**: 缓解梯度消失
+
+![SwiGLU](https://picx.zhimg.com/70/v2-80ccaa1eba350ba9de547575853da965_1440w.avis?source=172ae18b&biz_tag=Post)
+
+### 3. 绝对位置编码 → RoPE
+
+#### 经典绝对位置编码
+```python
+# 可学习参数
+self.position_embedding = nn.Parameter(torch.randn(1, max_len, embedding_dim))
+
+# 或固定正弦余弦
+pos_emb[:, 0::2] = torch.sin(position * div_term)
+pos_emb[:, 1::2] = torch.cos(position * div_term)
+```
+
+**问题**：
+- 序列长度限制
+- 外推能力差
+- 缺乏相对位置信息
+
+#### RoPE (Rotary Position Embedding)
+
+**核心思想**：通过几何旋转编码位置，使点积只依赖相对位置。
+
+```python
+def apply_rotary_pos_emb(q, k, cos, sin):
+    q_rot = (q * cos) + (rotate_half(q) * sin)
+    k_rot = (k * cos) + (rotate_half(k) * sin)
+    return q_rot, k_rot
+
+def rotate_half(x):
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat([-x2, x1], dim=-1)
+```
+
+#### 高维RoPE公式
+
+$$
+\mathbf{x}_t' = \mathbf{R}_{\Theta,t}^d \mathbf{x}_t =
+\begin{pmatrix}
+\cos t\theta_1 & -\sin t\theta_1 & 0 & 0 & \cdots & 0 & 0 \\
+\sin t\theta_1 &  \cos t\theta_1 & 0 & 0 & \cdots & 0 & 0 \\
+0 & 0 & \cos t\theta_2 & -\sin t\theta_2 & \cdots & 0 & 0 \\
+0 & 0 & \sin t\theta_2 &  \cos t\theta_2 & \cdots & 0 & 0 \\
+\vdots & \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\
+0 & 0 & 0 & 0 & \cdots & \cos t\theta_{d/2} & -\sin t\theta_{d/2} \\
+0 & 0 & 0 & 0 & \cdots & \sin t\theta_{d/2} & \cos t\theta_{d/2} \\
+\end{pmatrix}
+\begin{pmatrix}
+x_1 \\ x_2 \\ x_3 \\ x_4 \\ \vdots \\ x_{d-1} \\ x_d
+\end{pmatrix}
+$$
+
+其中旋转频率：$\theta_i = \frac{1}{10000^{2i/d}}$
+
+#### 核心优势
+
+- **完美相对位置**：点积只依赖相对距离
+- **强大外推能力**：支持未见过的序列长度
+- **零参数开销**：几何变换，无需额外参数
+- **计算高效**：旋转矩阵可预计算
 
 ### 4. Dense → MoE (Mixture of Experts)
 
-#### 经典Dense架构 (ViT中)
+#### 经典Dense架构
 ```python
-# 所有token都通过同一个MLP
+# 所有token通过同一个MLP
 class MLPBlock(nn.Module):
     def forward(self, x):
-        return self.mlp(x)  # 每个token激活所有参数
+        return self.mlp(x)  # 激活所有参数
 ```
 
-#### DeepSeek V3的MoE架构
+#### MoE架构
+
 ```python
 class MoE(nn.Module):
     def __init__(self, num_experts=67, top_k=8):
@@ -592,40 +621,47 @@ class MoE(nn.Module):
         return final_output
 ```
 
-**改进点**：
-- 模型由Dense转稀疏，节省成本
-- 参数量达千亿但计算成本可控
-- 支持专家并行训练
+![Ds MOE](https://assets.zilliz.com/Mo_E_in_Deep_Seek_V3_ee6b538922.png)
 
-### 5. 固定位置编码 → RoPE
+#### 核心改进
+- **模型稀疏化**: 由Dense转稀疏，节省成本
+- **参数规模**: 支持千亿参数，计算成本可控
+- **专家并行**: 支持分布式训练
 
-#### 经典位置编码 (ViT中)
+### 5. Multi-Head Attention → MLA (Multi-Head Latent Attention)
+
+#### 经典MHA
 ```python
-# 固定的正弦余弦编码
-self.position_embedding = nn.Parameter(torch.randn(1, num_patches + 1, embedding_dim))
+class MultiheadSelfAttentionBlock(nn.Module):
+    def __init__(self, embedding_dim: int, num_heads: int):
+        super().__init__()
+        self.q_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.k_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.v_proj = nn.Linear(embedding_dim, embedding_dim)
+        self.out_proj = nn.Linear(embedding_dim, embedding_dim)
 ```
 
-#### DeepSeek V3的RoPE
-[ 知乎 Rope详解 ]( https://zhuanlan.zhihu.com/p/642884818 )
+#### MLA优化
 ```python
-def apply_rotary_pos_emb(q, k, cos, sin):
-    # 旋转位置编码，支持相对位置
-    q_rot = (q * cos) + (rotate_half(q) * sin)
-    k_rot = (k * cos) + (rotate_half(k) * sin)
-    return q_rot, k_rot
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(self, num_heads, latent_dim):
+        super().__init__()
+        # 低维潜在空间注意力
+        self.latent_proj = nn.Linear(embedding_dim, latent_dim)
+        self.q_proj = nn.Linear(latent_dim, latent_dim)
+        self.k_proj = nn.Linear(latent_dim, latent_dim)
+        self.v_proj = nn.Linear(latent_dim, latent_dim)
+        self.out_proj = nn.Linear(latent_dim, embedding_dim)
+
+    def forward(self, x):
+        # 压缩到潜在空间 -> 注意力计算 -> 恢复原始维度
+        latent = self.latent_proj(x)
+        # 在低维空间计算注意力，减少计算量
 ```
 
-**改进点**：
-- 支持训练时未见过的序列长度
-- 更好的外推能力
-- 位置信息具有相对性
+![MLA](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*tEzj6GIBEW0LEu40nCWdxQ.png)
 
-## 架构改进对比表
-
-| ViT模块 | DeepSeek V3改进 | 核心优势 |
-|---------|----------------|----------|
-| Multi-Head Attention | MLA (Multi-Head Latent Attention) | 降低计算复杂度，减少KV缓存 |
-| LayerNorm | RMSNorm | 提速30%，减少参数，训练更稳定 |
-| GELU + Dense | SwiGLU + MoE | 专家混合，千亿参数，计算可控 |
-| 固定位置编码 | RoPE | 支持长序列外推，相对位置感知 |
-| 标准MLP | 门控MLP | 门控机制，增强表达能力 |
+#### 核心改进
+- **计算压缩**: 注意力计算压缩到低维潜在空间
+- **KV缓存减少**: 大幅减少内存占用
+- **长上下文支持**: 支持更长上下文序列

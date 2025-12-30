@@ -20,6 +20,7 @@ KV Cache Size = 2 × num_layers × seq_len × num_kv_heads × head_dim × dtype_
 
 传统方案的问题在于 **预分配最大长度**。假设 `max_model_len = 4096`，即使一个请求实际只生成 100 个 token，也会预分配 4096 长度的 KV Cache 空间，导致 **60%-80% 的显存浪费**。此外，不同请求的实际长度参差不齐，容易产生 **显存碎片**。
 ![pic](https://cdn.prod.website-files.com/618399cd49d125734c8dec95/663e10712d1f683554c11f56_UubwS2ISHuve8WjvuB6QaIzh9MZzmLNC5Rz4EhJ03CS_6u9KrhRMkWHexslnmdTYCCjEp07aqg3sBmQy-63FxZnSNUTYOr1V-7Dr53qq4PvpERJaxf3DAKU_lKIFSHxSl7BbZpZDKruOOYkNDft7YaQ.png)
+
 ### 1.2 PagedAttention 核心思想
 
 PagedAttention 借鉴了操作系统虚拟内存管理的 **分页机制**：
@@ -28,7 +29,7 @@ PagedAttention 借鉴了操作系统虚拟内存管理的 **分页机制**：
 |-------------|-------------------|
 | 页（Page） | Block（固定大小的 KV Cache 块） |
 | 页表（Page Table） | Block Table（逻辑位置到物理 Block 的映射） |
-| 物理页框（Frame） | 预分配的 GPU 显存中的 Block 槽位 |
+| slot | 预分配的 GPU 显存中的 Block 槽位 |
 | 进程（Process） | Sequence（一个推理请求） |
 
 核心优势：
@@ -58,165 +59,8 @@ nanovllm/
 
 ### 2.2 模块协作关系图
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .arch-container {
-            background-color: white;
-            padding: 40px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .arch-title {
-            font-size: 18px;
-            font-weight: bold;
-            margin-bottom: 30px;
-            text-align: center;
-            color: #333;
-        }
-        .arch-diagram {
-            position: relative;
-            width: 750px;
-            height: 420px;
-            margin: 0 auto;
-        }
-        .arch-module {
-            position: absolute;
-            border: 2px solid #333;
-            border-radius: 8px;
-            padding: 12px 16px;
-            text-align: center;
-            font-size: 13px;
-            font-weight: bold;
-        }
-        .arch-file {
-            font-size: 10px;
-            font-weight: normal;
-            color: #666;
-            margin-top: 4px;
-        }
-        .arch-scheduler { background: #E3F2FD; left: 20px; top: 160px; width: 100px; }
-        .arch-block-mgr { background: #FFF3E0; left: 180px; top: 160px; width: 120px; }
-        .arch-sequence { background: #E8F5E9; left: 360px; top: 160px; width: 100px; }
-        .arch-model-runner { background: #FCE4EC; left: 520px; top: 80px; width: 120px; }
-        .arch-context { background: #F3E5F5; left: 520px; top: 240px; width: 120px; }
-        .arch-attention { background: #E0F7FA; left: 520px; top: 160px; width: 120px; }
-        .arch-kv-cache { background: #FBE9E7; left: 680px; top: 160px; width: 60px; border-style: dashed; }
-        .arch-legend {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            font-size: 11px;
-            color: #666;
-        }
-        .arch-flow {
-            position: absolute;
-            top: 20px;
-            left: 0;
-            right: 0;
-            text-align: center;
-        }
-        .arch-flow-box {
-            display: inline-block;
-            padding: 8px 20px;
-            margin: 0 5px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .arch-flow-arrow {
-            display: inline-block;
-            color: #999;
-            font-size: 16px;
-        }
-        .arch-desc {
-            position: absolute;
-            font-size: 10px;
-            color: #666;
-            max-width: 80px;
-            text-align: center;
-        }
-    </style>
-</head>
-<body>
-    <div class="arch-container">
-        <div class="arch-title">nano-vllm PagedAttention 模块协作图</div>
-        <div class="arch-diagram">
-            <svg width="750" height="350" style="position: absolute; top: 40px; left: 0;">
-                <defs>
-                    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-                        <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
-                    </marker>
-                </defs>
-                <!-- Scheduler -> BlockManager -->
-                <line x1="125" y1="180" x2="175" y2="180" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- BlockManager -> Sequence -->
-                <line x1="305" y1="180" x2="355" y2="180" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- Sequence -> ModelRunner -->
-                <path d="M 465 160 Q 490 100 515 100" fill="none" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- ModelRunner -> Context -->
-                <line x1="580" y1="145" x2="580" y2="195" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- ModelRunner -> Attention -->
-                <line x1="580" y1="145" x2="580" y2="155" stroke="#666" stroke-width="2"/>
-                <!-- Context -> Attention -->
-                <line x1="580" y1="235" x2="580" y2="225" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-                <!-- Attention -> KV Cache -->
-                <line x1="645" y1="180" x2="675" y2="180" stroke="#666" stroke-width="2" marker-end="url(#arrow)"/>
-            </svg>
-            
-            <div class="arch-flow">
-                <span class="arch-flow-box" style="background: #BBDEFB;">1. 调度</span>
-                <span class="arch-flow-arrow">→</span>
-                <span class="arch-flow-box" style="background: #FFE0B2;">2. 分配Block</span>
-                <span class="arch-flow-arrow">→</span>
-                <span class="arch-flow-box" style="background: #C8E6C9;">3. 更新映射</span>
-                <span class="arch-flow-arrow">→</span>
-                <span class="arch-flow-box" style="background: #F8BBD9;">4. 准备上下文</span>
-                <span class="arch-flow-arrow">→</span>
-                <span class="arch-flow-box" style="background: #B2EBF2;">5. 执行Attention</span>
-            </div>
-            
-            <div class="arch-module arch-scheduler">
-                Scheduler
-                <div class="arch-file">scheduler.py</div>
-            </div>
-            <div class="arch-module arch-block-mgr">
-                BlockManager
-                <div class="arch-file">block_manager.py</div>
-            </div>
-            <div class="arch-module arch-sequence">
-                Sequence
-                <div class="arch-file">sequence.py</div>
-            </div>
-            <div class="arch-module arch-model-runner">
-                ModelRunner
-                <div class="arch-file">model_runner.py</div>
-            </div>
-            <div class="arch-module arch-context">
-                Context
-                <div class="arch-file">context.py</div>
-            </div>
-            <div class="arch-module arch-attention">
-                Attention
-                <div class="arch-file">attention.py</div>
-            </div>
-            <div class="arch-module arch-kv-cache">
-                KV<br>Cache
-            </div>
-            
-            <div class="arch-desc" style="left: 125px; top: 210px;">allocate<br>deallocate</div>
-            <div class="arch-desc" style="left: 305px; top: 210px;">block_table</div>
-            <div class="arch-desc" style="left: 640px; top: 210px;">read/write</div>
-            
-            <div class="arch-legend">
-                * 实线箭头表示主要数据/调用流向，虚线框表示 GPU 显存
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-```
+![图 0](../.assets/9f28c9fd08682b0ae892c33534320503b8a0ad180619a335e9100da41413ff1d.png)  
+
 
 **核心协作流程**：
 
@@ -236,38 +80,52 @@ Block 是 PagedAttention 的最小存储单元，代表 KV Cache 中的一个固
 
 ```python
 class Block:
+    """
+    物理 Block，KV Cache 的最小存储单元。
+    
+    每个 Block 可存储 block_size 个 token 的 KV 向量。
+    通过 ref_count 支持多个 Sequence 共享同一 Block（Prefix Caching）。
+    通过 hash 和 token_ids 支持缓存查找和碰撞校验。
+    """
 
     def __init__(self, block_id):
-        self.block_id = block_id      # 物理 Block 的唯一标识
-        self.ref_count = 0            # 引用计数，支持 Prefix Caching 共享
-        self.hash = -1                # Block 内容的 hash 值
-        self.token_ids = []           # Block 中存储的 token IDs
+        # block_id: 物理 Block 的唯一标识，对应 KV Cache Tensor 的第 2 维索引
+        # 创建后不变，范围是 [0, num_kvcache_blocks)
+        self.block_id = block_id
+        
+        # ref_count: 引用计数
+        # = 0: Block 空闲，在 free_block_ids 中
+        # = 1: 被一个 Sequence 独占使用
+        # > 1: 被多个 Sequence 共享（Prefix Caching 场景）
+        self.ref_count = 0
+        
+        # hash: Block 内容的 xxhash 值，用于 Prefix Caching 快速查找
+        # = -1: Block 未填满，或不参与缓存
+        # != -1: Block 已填满，可被后续请求复用
+        self.hash = -1
+        
+        # token_ids: Block 中存储的 token 序列
+        # 用于 hash 碰撞时的精确校验，确保内容真正相同
+        self.token_ids = []
 
     def update(self, hash: int, token_ids: list[int]):
-        """更新 Block 的缓存标识，用于 Prefix Caching"""
+        """
+        更新 Block 的缓存标识。
+        只在 Block 填满（包含完整 block_size 个 token）时调用。
+        更新后，该 Block 可被后续具有相同前缀的请求复用。
+        """
         self.hash = hash
         self.token_ids = token_ids
 
     def reset(self):
-        """重置 Block 状态，供新分配使用"""
-        self.ref_count = 1
-        self.hash = -1
-        self.token_ids = []
+        """
+        重置 Block 状态，供新分配使用。
+        在从 free_block_ids 取出并分配给新 Sequence 时调用。
+        """
+        self.ref_count = 1      # 新分配，初始引用计数为 1
+        self.hash = -1          # 清除旧的 hash（新内容待写入）
+        self.token_ids = []     # 清除旧的 token_ids
 ```
-
-**字段详解**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `block_id` | int | 物理 Block 在 KV Cache Tensor 中的索引，创建后不变 |
-| `ref_count` | int | 引用计数。=0 表示空闲，=1 表示被一个 Sequence 使用，>1 表示被多个 Sequence 共享 |
-| `hash` | int | Block 内容的 xxhash 值。=-1 表示 Block 未填满或不参与缓存 |
-| `token_ids` | list[int] | Block 对应的完整 token 序列，用于 hash 碰撞时的校验 |
-
-**设计意图**：
-- `hash` 用于快速查找：O(1) 判断是否存在相同内容的 Block
-- `token_ids` 用于精确校验：防止 hash 碰撞导致的错误命中
-- 只有 **填满** 的 Block 才会设置 `hash` 和 `token_ids`
 
 ### 3.2 BlockManager 类（block_manager.py）
 
@@ -275,540 +133,424 @@ BlockManager 是 Block 的管理器，负责分配、回收和 Prefix Caching。
 
 ```python
 class BlockManager:
+    """
+    Block 管理器，PagedAttention 的核心组件。
+    
+    职责：
+    1. 管理物理 Block 的分配和回收
+    2. 维护空闲 Block 池
+    3. 实现 Prefix Caching（通过 hash 索引和引用计数）
+    """
 
     def __init__(self, num_blocks: int, block_size: int):
+        # block_size: 每个 Block 容纳的 token 数，默认 256
         self.block_size = block_size
+        
+        # blocks: 所有物理 Block 实例的列表
+        # 索引即 block_id，长度为 num_blocks
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
+        
+        # hash_to_block_id: hash 值到 block_id 的映射
+        # Prefix Caching 的核心索引，用于 O(1) 查找是否存在相同内容的 Block
         self.hash_to_block_id: dict[int, int] = dict()
+        
+        # free_block_ids: 空闲 Block ID 队列
+        # 使用 deque 实现 FIFO 分配策略
         self.free_block_ids: deque[int] = deque(range(num_blocks))
+        
+        # used_block_ids: 已使用的 Block ID 集合
+        # 用于 O(1) 判断某个 Block 是否正在被使用
         self.used_block_ids: set[int] = set()
-```
 
-**字段详解**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `block_size` | int | 每个 Block 容纳的 token 数，默认 256 |
-| `blocks` | list[Block] | 所有物理 Block 实例，索引即 `block_id` |
-| `hash_to_block_id` | dict[int, int] | hash → block_id 映射，Prefix Caching 的核心索引 |
-| `free_block_ids` | deque[int] | 空闲 Block ID 队列，FIFO 分配 |
-| `used_block_ids` | set[int] | 已使用的 Block ID 集合，O(1) 查询 |
-
-**核心方法**：
-
-#### 3.2.1 `compute_hash(token_ids, prefix) -> int`
-
-计算 Block 内容的 hash 值，支持链式传递前缀 hash。
-
-```python
-@classmethod
-def compute_hash(cls, token_ids: list[int], prefix: int = -1):
-    h = xxhash.xxh64()
-    if prefix != -1:
-        h.update(prefix.to_bytes(8, "little"))  # 包含前缀 hash
-    h.update(np.array(token_ids).tobytes())
-    return h.intdigest()
-```
-
-**链式 hash 的意义**：Block 2 的 hash 依赖于 Block 0 和 Block 1 的内容，确保只有**完全相同的前缀**才能匹配。
-
-#### 3.2.2 `can_allocate(seq) -> bool`
-
-检查是否有足够的空闲 Block 为 Sequence 分配。
-
-```python
-def can_allocate(self, seq: Sequence) -> bool:
-    return len(self.free_block_ids) >= seq.num_blocks
-```
-
-**注意**：这是保守估计，未考虑 Prefix Caching 命中可能减少的分配需求。
-
-#### 3.2.3 `allocate(seq)`
-
-为 Sequence 分配 Block，核心方法，包含完整的 Prefix Caching 逻辑。
-
-```python
-def allocate(self, seq: Sequence):
-    assert not seq.block_table  # 确保是新请求
-    h = -1                       # 前缀 hash
-    cache_miss = False           # 一旦 miss，后续都是 miss
-    
-    for i in range(seq.num_blocks):
-        token_ids = seq.block(i)
-        # 只有完整 Block 才计算 hash
-        h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
-        block_id = self.hash_to_block_id.get(h, -1)
+    @classmethod
+    def compute_hash(cls, token_ids: list[int], prefix: int = -1):
+        """
+        计算 Block 内容的 hash 值。
         
-        # hash 命中但内容不匹配，视为 miss
-        if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
-            cache_miss = True
+        使用链式 hash：当前 Block 的 hash 依赖于前缀 Block 的 hash。
+        这确保了只有「前缀完全相同」的 Block 序列才能匹配。
         
-        if cache_miss:
-            # Cache Miss：从空闲池分配新 Block
-            block_id = self.free_block_ids[0]
-            block = self._allocate_block(block_id)
-        else:
-            # Cache Hit：复用已有 Block
-            seq.num_cached_tokens += self.block_size
-            if block_id in self.used_block_ids:
-                block = self.blocks[block_id]
-                block.ref_count += 1
-            else:
-                block = self._allocate_block(block_id)
+        Args:
+            token_ids: 当前 Block 的 token 列表
+            prefix: 前一个 Block 的 hash 值，-1 表示这是第一个 Block
         
-        if h != -1:
-            block.update(h, token_ids)
-            self.hash_to_block_id[h] = block_id
-        
-        seq.block_table.append(block_id)
-```
+        Returns:
+            64 位整数 hash 值
+        """
+        h = xxhash.xxh64()
+        if prefix != -1:
+            # 将前缀 hash 纳入计算，实现链式依赖
+            h.update(prefix.to_bytes(8, "little"))
+        h.update(np.array(token_ids).tobytes())
+        return h.intdigest()
 
-#### 3.2.4 `can_append(seq) -> bool`
-
-检查是否能为 Sequence 追加新的 token（可能需要新 Block）。
-
-```python
-def can_append(self, seq: Sequence) -> bool:
-    # 只有当需要新 Block 时才检查空闲池
-    return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
-```
-
-#### 3.2.5 `may_append(seq)`
-
-Decode 阶段追加 Block，处理三种情况：
-
-```python
-def may_append(self, seq: Sequence):
-    block_table = seq.block_table
-    last_block = self.blocks[block_table[-1]]
-    
-    if len(seq) % self.block_size == 1:
-        # 情况1：需要新 Block（上一个已满）
-        block_id = self.free_block_ids[0]
-        self._allocate_block(block_id)
-        block_table.append(block_id)
-        
-    elif len(seq) % self.block_size == 0:
-        # 情况2：当前 Block 刚填满，更新 hash
-        token_ids = seq.block(seq.num_blocks - 1)
-        prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
-        h = self.compute_hash(token_ids, prefix)
-        last_block.update(h, token_ids)
-        self.hash_to_block_id[h] = last_block.block_id
-        
-    else:
-        # 情况3：Block 正在填充中，无需操作
-        pass
-```
-
-#### 3.2.6 `deallocate(seq)`
-
-释放 Sequence 占用的所有 Block。
-
-```python
-def deallocate(self, seq: Sequence):
-    for block_id in reversed(seq.block_table):
+    def _allocate_block(self, block_id: int) -> Block:
+        """
+        内部方法：将指定 Block 从空闲池移到已使用集合。
+        """
         block = self.blocks[block_id]
-        block.ref_count -= 1
-        if block.ref_count == 0:
-            self._deallocate_block(block_id)
-    seq.num_cached_tokens = 0
-    seq.block_table.clear()
+        assert block.ref_count == 0  # 确保 Block 确实是空闲的
+        block.reset()                # 重置状态
+        self.free_block_ids.remove(block_id)
+        self.used_block_ids.add(block_id)
+        return self.blocks[block_id]
+
+    def _deallocate_block(self, block_id: int) -> Block:
+        """
+        内部方法：将指定 Block 从已使用集合移回空闲池。
+        注意：不清除 hash 和 token_ids，以便后续可能的缓存命中。
+        """
+        assert self.blocks[block_id].ref_count == 0
+        self.used_block_ids.remove(block_id)
+        self.free_block_ids.append(block_id)  # 放到队尾，FIFO
+
+    def can_allocate(self, seq: Sequence) -> bool:
+        """
+        检查是否有足够的空闲 Block 为 Sequence 分配。
+        
+        这是保守估计，未考虑 Prefix Caching 命中可能减少的需求。
+        实际分配时可能因缓存命中而需要更少的 Block。
+        """
+        return len(self.free_block_ids) >= seq.num_blocks
+
+    def allocate(self, seq: Sequence):
+        """
+        为 Sequence 分配 Block，核心方法。
+        
+        包含完整的 Prefix Caching 逻辑：
+        1. 遍历 Sequence 的每个逻辑 Block
+        2. 计算链式 hash，查找缓存
+        3. 缓存命中则复用，未命中则新分配
+        4. 更新 Sequence 的 block_table
+        
+        调用时机：Prefill 阶段，新请求开始执行时
+        """
+        assert not seq.block_table  # 确保是新请求，block_table 应为空
+        h = -1                       # 前缀 hash，用于链式计算
+        cache_miss = False           # 一旦发生 miss，后续都是 miss
+        
+        for i in range(seq.num_blocks):
+            token_ids = seq.block(i)  # 获取第 i 个逻辑 Block 的 token
+            
+            # 只有完整 Block（包含 block_size 个 token）才计算 hash
+            # 最后一个未填满的 Block 不参与缓存
+            h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
+            
+            # 在缓存索引中查找
+            block_id = self.hash_to_block_id.get(h, -1)
+            
+            # 双重校验：hash 匹配 + 内容匹配
+            # 防止 hash 碰撞或 Block 被覆写导致的错误命中
+            if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
+                cache_miss = True
+            
+            if cache_miss:
+                # Cache Miss：从空闲池分配新 Block
+                block_id = self.free_block_ids[0]
+                block = self._allocate_block(block_id)
+            else:
+                # Cache Hit：复用已有 Block
+                seq.num_cached_tokens += self.block_size  # 累加缓存命中的 token 数
+                if block_id in self.used_block_ids:
+                    # Block 正被其他 Sequence 使用，增加引用计数
+                    block = self.blocks[block_id]
+                    block.ref_count += 1
+                else:
+                    # Block 在空闲池中（之前被回收但 hash 保留），重新激活
+                    block = self._allocate_block(block_id)
+            
+            # 更新 Block 的 hash 和 token_ids（仅完整 Block）
+            if h != -1:
+                block.update(h, token_ids)
+                self.hash_to_block_id[h] = block_id
+            
+            # 将 block_id 加入 Sequence 的 block_table
+            seq.block_table.append(block_id)
+
+    def deallocate(self, seq: Sequence):
+        """
+        释放 Sequence 占用的所有 Block。
+        
+        通过引用计数实现：
+        - ref_count 减 1
+        - 只有当 ref_count 降为 0 时才真正释放
+        
+        调用时机：
+        1. 请求完成（postprocess 中检测到 EOS 或达到 max_tokens）
+        2. 请求被抢占（preempt）
+        """
+        for block_id in reversed(seq.block_table):  # 逆序遍历（栈语义）
+            block = self.blocks[block_id]
+            block.ref_count -= 1
+            if block.ref_count == 0:
+                self._deallocate_block(block_id)
+        seq.num_cached_tokens = 0
+        seq.block_table.clear()
+
+    def can_append(self, seq: Sequence) -> bool:
+        """
+        检查是否能为 Sequence 追加新 token（可能需要新 Block）。
+        
+        只有当 len(seq) % block_size == 1 时（即上一个 Block 刚满），
+        才需要分配新 Block。其他情况直接写入现有 Block。
+        
+        调用时机：Decode 阶段，每次迭代前检查
+        """
+        return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
+
+    def may_append(self, seq: Sequence):
+        """
+        Decode 阶段追加 Block 的处理。
+        
+        三种情况：
+        1. len % block_size == 1: 需要新 Block（上一个已满）
+        2. len % block_size == 0: 当前 Block 刚填满，更新其 hash
+        3. 其他: Block 正在填充中，无需操作
+        
+        调用时机：Decode 阶段，can_append 返回 True 后调用
+        """
+        block_table = seq.block_table
+        last_block = self.blocks[block_table[-1]]
+        
+        if len(seq) % self.block_size == 1:
+            # 情况1：刚好需要新 Block（上一个已满）
+            assert last_block.hash != -1  # 上一个 Block 应该已经完整并有 hash
+            block_id = self.free_block_ids[0]
+            self._allocate_block(block_id)
+            block_table.append(block_id)
+            
+        elif len(seq) % self.block_size == 0:
+            # 情况2：当前 Block 刚好填满，更新其 hash（供后续 Prefix Cache）
+            assert last_block.hash == -1  # 之前应该是未完成状态
+            token_ids = seq.block(seq.num_blocks - 1)
+            prefix = self.blocks[block_table[-2]].hash if len(block_table) > 1 else -1
+            h = self.compute_hash(token_ids, prefix)
+            last_block.update(h, token_ids)
+            self.hash_to_block_id[h] = last_block.block_id
+            
+        else:
+            # 情况3：Block 正在填充中，无需操作
+            assert last_block.hash == -1  # 确认是未完成状态
 ```
 
-**使用示例**：
+### 3.3 Sequence 类（sequence.py）
+
+Sequence 代表一个推理请求，包含 token 序列和 Block 映射信息。
 
 ```python
-# 典型调用顺序
-block_manager = BlockManager(num_blocks=100, block_size=256)
+class SequenceStatus(Enum):
+    """Sequence 的状态枚举"""
+    WAITING = auto()   # 等待调度
+    RUNNING = auto()   # 正在执行
+    FINISHED = auto()  # 已完成
 
-# 新请求到达
-if block_manager.can_allocate(seq):
-    block_manager.allocate(seq)
 
-# Decode 阶段
-if block_manager.can_append(seq):
-    block_manager.may_append(seq)
-
-# 请求完成
-block_manager.deallocate(seq)
-```
-
-### 3.3 Sequence 类中的 Block 相关部分（sequence.py）
-
-Sequence 代表一个推理请求，其中与 Block 相关的字段和方法如下：
-
-```python
 class Sequence:
-    block_size = 256  # 类变量
+    """
+    推理请求的抽象，包含输入 token、生成状态和 Block 映射。
     
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    核心职责：
+    1. 存储 prompt 和生成的 token
+    2. 维护 block_table（逻辑 Block 到物理 Block 的映射）
+    3. 记录 Prefix Caching 命中信息
+    """
+    
+    # 类变量：所有 Sequence 共享的 Block 大小
+    block_size = 256
+    
+    # 类变量：Sequence ID 生成器，确保每个请求有唯一 ID
+    counter = count()
+
+    def __init__(self, token_ids: list[int], sampling_params=SamplingParams()):
+        # seq_id: 唯一标识符，用于结果排序和追踪
+        self.seq_id = next(Sequence.counter)
+        
+        # status: 当前状态（WAITING -> RUNNING -> FINISHED）
+        self.status = SequenceStatus.WAITING
+        
+        # token_ids: 完整的 token 序列（prompt + 已生成的 token）
+        # 使用 copy 避免外部修改影响
         self.token_ids = copy(token_ids)
+        
+        # last_token: 最后一个 token，Decode 阶段的输入
+        self.last_token = token_ids[-1]
+        
+        # num_tokens: 当前总 token 数（prompt + 已生成）
         self.num_tokens = len(self.token_ids)
+        
+        # num_prompt_tokens: prompt 的 token 数，不变
         self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0      # Prefix Cache 命中的 token 数
-        self.block_table = []           # 逻辑 Block → 物理 Block ID
-        # ...
-```
+        
+        # num_cached_tokens: Prefix Caching 命中的 token 数
+        # 由 BlockManager.allocate 设置，用于跳过已缓存部分的计算
+        self.num_cached_tokens = 0
+        
+        # block_table: 逻辑 Block 索引 -> 物理 Block ID 的映射
+        # 例如 [7, 3, 12] 表示：
+        #   逻辑 Block 0 -> 物理 Block 7
+        #   逻辑 Block 1 -> 物理 Block 3
+        #   逻辑 Block 2 -> 物理 Block 12
+        self.block_table = []
+        
+        # 采样参数
+        self.temperature = sampling_params.temperature
+        self.max_tokens = sampling_params.max_tokens
+        self.ignore_eos = sampling_params.ignore_eos
 
-**核心属性**：
+    def __len__(self):
+        """返回当前 token 总数"""
+        return self.num_tokens
 
-```python
-@property
-def num_blocks(self):
-    """当前 Sequence 需要的 Block 总数"""
-    return (self.num_tokens + self.block_size - 1) // self.block_size
+    def __getitem__(self, key):
+        """支持切片访问 token_ids"""
+        return self.token_ids[key]
 
-@property
-def num_cached_blocks(self):
-    """Prefix Cache 命中的 Block 数"""
-    return self.num_cached_tokens // self.block_size
+    @property
+    def is_finished(self):
+        """是否已完成"""
+        return self.status == SequenceStatus.FINISHED
 
-@property
-def last_block_num_tokens(self):
-    """最后一个 Block 中的 token 数量"""
-    return self.num_tokens - (self.num_blocks - 1) * self.block_size
+    @property
+    def num_completion_tokens(self):
+        """已生成的 token 数（不含 prompt）"""
+        return self.num_tokens - self.num_prompt_tokens
 
-def block(self, i):
-    """获取第 i 个逻辑 Block 对应的 token IDs"""
-    return self.token_ids[i * self.block_size : (i + 1) * self.block_size]
+    @property
+    def prompt_token_ids(self):
+        """prompt 部分的 token"""
+        return self.token_ids[:self.num_prompt_tokens]
+
+    @property
+    def completion_token_ids(self):
+        """生成部分的 token"""
+        return self.token_ids[self.num_prompt_tokens:]
+
+    @property
+    def num_cached_blocks(self):
+        """Prefix Caching 命中的 Block 数"""
+        return self.num_cached_tokens // self.block_size
+
+    @property
+    def num_blocks(self):
+        """
+        当前需要的 Block 总数。
+        向上取整：(num_tokens + block_size - 1) // block_size
+        """
+        return (self.num_tokens + self.block_size - 1) // self.block_size
+
+    @property
+    def last_block_num_tokens(self):
+        """
+        最后一个 Block 中的 token 数量。
+        可能不满 block_size（正在填充中）。
+        """
+        return self.num_tokens - (self.num_blocks - 1) * self.block_size
+
+    def block(self, i):
+        """
+        获取第 i 个逻辑 Block 对应的 token 列表。
+        用于计算 hash 和内容校验。
+        """
+        assert 0 <= i < self.num_blocks
+        return self.token_ids[i * self.block_size: (i + 1) * self.block_size]
+
+    def append_token(self, token_id: int):
+        """
+        追加新生成的 token。
+        在 Scheduler.postprocess 中调用。
+        """
+        self.token_ids.append(token_id)
+        self.last_token = token_id
+        self.num_tokens += 1
+
+    def __getstate__(self):
+        """
+        序列化支持（用于多进程通信）。
+        只传输必要的字段，减少通信开销。
+        """
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, 
+                self.block_table,
+                self.token_ids if self.num_completion_tokens == 0 else self.last_token)
+
+    def __setstate__(self, state):
+        """反序列化"""
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        if self.num_completion_tokens == 0:
+            self.token_ids = state[-1]
+        else:
+            self.last_token = state[-1]
 ```
 
 **block_table 映射关系图**：
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .bt-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .bt-title {
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 20px;
-            color: #333;
-        }
-        .bt-section {
-            margin-bottom: 25px;
-        }
-        .bt-label {
-            font-weight: bold;
-            color: #555;
-            margin-bottom: 8px;
-        }
-        .bt-row {
-            display: flex;
-            align-items: center;
-        }
-        .bt-cell {
-            width: 70px;
-            height: 45px;
-            border: 2px solid #333;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-right: 8px;
-            font-size: 12px;
-            text-align: center;
-            border-radius: 4px;
-        }
-        .bt-logical { background: #E3F2FD; }
-        .bt-tokens { background: #E8F5E9; }
-        .bt-physical { background: #FFF3E0; }
-        .bt-last { border-color: #F44336; border-width: 3px; }
-        .bt-arrow-section {
-            display: flex;
-            justify-content: center;
-            margin: 15px 0;
-        }
-        .bt-arrow-group {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            margin: 0 30px;
-        }
-        .bt-arrow {
-            font-size: 24px;
-            color: #666;
-        }
-        .bt-note {
-            font-size: 11px;
-            color: #888;
-            margin-top: 15px;
-        }
-        .bt-formula {
-            background: #F5F5F5;
-            padding: 10px 15px;
-            border-radius: 5px;
-            font-family: 'Consolas', monospace;
-            font-size: 13px;
-            margin-top: 15px;
-        }
-    </style>
-</head>
-<body>
-    <div class="bt-container">
-        <div class="bt-title">Sequence 的 block_table 映射示例</div>
-        <div class="bt-section">
-            <div class="bt-label">假设：block_size = 4，Sequence 有 10 个 token</div>
-        </div>
-        
-        <div class="bt-section">
-            <div class="bt-label">逻辑 Block 索引：</div>
-            <div class="bt-row">
-                <div class="bt-cell bt-logical">Block 0</div>
-                <div class="bt-cell bt-logical">Block 1</div>
-                <div class="bt-cell bt-logical bt-last">Block 2</div>
-            </div>
-        </div>
-        
-        <div class="bt-section">
-            <div class="bt-label">Token 分布：</div>
-            <div class="bt-row">
-                <div class="bt-cell bt-tokens">t0,t1,t2,t3</div>
-                <div class="bt-cell bt-tokens">t4,t5,t6,t7</div>
-                <div class="bt-cell bt-tokens bt-last">t8,t9</div>
-            </div>
-        </div>
-        
-        <div class="bt-arrow-section">
-            <div class="bt-arrow-group">
-                <div class="bt-arrow">↓</div>
-                <div style="font-size: 11px; color: #666;">block_table[0]=7</div>
-            </div>
-            <div class="bt-arrow-group">
-                <div class="bt-arrow">↓</div>
-                <div style="font-size: 11px; color: #666;">block_table[1]=3</div>
-            </div>
-            <div class="bt-arrow-group">
-                <div class="bt-arrow">↓</div>
-                <div style="font-size: 11px; color: #666;">block_table[2]=12</div>
-            </div>
-        </div>
-        
-        <div class="bt-section">
-            <div class="bt-label">物理 Block ID（在 KV Cache Tensor 中的位置）：</div>
-            <div class="bt-row">
-                <div class="bt-cell bt-physical">Physical 7</div>
-                <div class="bt-cell bt-physical">Physical 3</div>
-                <div class="bt-cell bt-physical bt-last">Physical 12</div>
-            </div>
-        </div>
-        
-        <div class="bt-formula">
-            block_table = [7, 3, 12]<br>
-            num_blocks = 3<br>
-            num_cached_blocks = 0（假设无缓存命中）<br>
-            last_block_num_tokens = 10 - 2×4 = 2
-        </div>
-        
-        <div class="bt-note">* 红框标注的是最后一个 Block，可能未填满</div>
-    </div>
-</body>
-</html>
-```
+![图 2](../.assets/57b930eeb3fef7b770c5bc635fffd785cefaa09726efb3613ddbab109f33aba0.png)  
 
-### 3.4 KV Cache 物理存储（model_runner.py）
+### 3.4 KV Cache 物理存储（model_runner.py 部分代码）
 
-KV Cache 的物理存储是一个预分配的 GPU Tensor，由 `ModelRunner.allocate_kv_cache()` 方法创建。
-
-**Tensor 形状**：
-
-```
-[2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]
- │      │           │           │            │           │
- │      │           │           │            │           └─ 每个头的维度
- │      │           │           │            └─ KV 头数量
- │      │           │           └─ 每个 Block 的槽位数
- │      │           └─ 物理 Block 总数
- │      └─ Transformer 层数
- └─ 0=Key, 1=Value
-```
-
-**分配方法**：
+KV Cache 的物理存储由 `ModelRunner.allocate_kv_cache()` 方法创建。
 
 ```python
 def allocate_kv_cache(self):
+    """
+    分配 KV Cache 的 GPU 显存。
+    
+    根据可用显存自动计算可分配的 Block 数量，
+    然后预分配一个大的 Tensor 作为所有 Block 的存储。
+    
+    调用时机：ModelRunner 初始化时，模型加载后
+    """
     config = self.config
     hf_config = config.hf_config
     
-    # 1. 获取显存信息
+    # 1. 获取 GPU 显存信息
     free, total = torch.cuda.mem_get_info()
     used = total - free
+    # peak: 模型加载和预热过程中的峰值显存
     peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+    # current: 当前已分配的显存
     current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
     
     # 2. 计算单个 Block 的显存占用
+    # 考虑张量并行：每个 GPU 只存储部分 KV 头
     num_kv_heads = hf_config.num_key_value_heads // self.world_size
-    block_bytes = (2 * hf_config.num_hidden_layers * self.block_size * 
-                   num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize)
+    block_bytes = (2 *                              # K 和 V
+                   hf_config.num_hidden_layers *    # 层数（如 28）
+                   self.block_size *                # block_size（如 256）
+                   num_kv_heads *                   # KV 头数（如 8）
+                   hf_config.head_dim *             # 头维度（如 128）
+                   hf_config.torch_dtype.itemsize)  # 数据类型大小（如 2 for bf16）
     
     # 3. 计算可分配的 Block 数量
+    # 可用显存 = 总显存 × 利用率 - 已用 - (峰值 - 当前)
     available = total * config.gpu_memory_utilization - used - peak + current
     config.num_kvcache_blocks = int(available) // block_bytes
+    assert config.num_kvcache_blocks > 0, "Not enough GPU memory for KV Cache"
     
-    # 4. 预分配 Tensor
+    # 4. 预分配 KV Cache Tensor
+    # 形状: [2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]
     self.kv_cache = torch.empty(
-        2, hf_config.num_hidden_layers, config.num_kvcache_blocks,
-        self.block_size, num_kv_heads, hf_config.head_dim
+        2,                              # 0: Key, 1: Value
+        hf_config.num_hidden_layers,    # 层数
+        config.num_kvcache_blocks,      # Block 数量
+        self.block_size,                # 每个 Block 的 token 数
+        num_kv_heads,                   # KV 头数
+        hf_config.head_dim              # 头维度
     )
     
-    # 5. 绑定到每个 Attention 层
+    # 5. 将 KV Cache 切片绑定到每个 Attention 层
+    # 每层获得 [num_blocks, block_size, num_kv_heads, head_dim] 的视图
     layer_id = 0
     for module in self.model.modules():
         if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-            module.k_cache = self.kv_cache[0, layer_id]
-            module.v_cache = self.kv_cache[1, layer_id]
+            module.k_cache = self.kv_cache[0, layer_id]  # 该层的 K Cache
+            module.v_cache = self.kv_cache[1, layer_id]  # 该层的 V Cache
             layer_id += 1
 ```
 
 **KV Cache Tensor 结构图**：
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .kv-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .kv-title {
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 25px;
-        }
-        .kv-dim-row {
-            display: flex;
-            align-items: center;
-            margin-bottom: 12px;
-        }
-        .kv-dim-label {
-            width: 220px;
-            font-size: 13px;
-            color: #333;
-        }
-        .kv-dim-boxes {
-            display: flex;
-            align-items: center;
-        }
-        .kv-box {
-            min-width: 45px;
-            height: 32px;
-            border: 1px solid #666;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 11px;
-            margin-right: 3px;
-            padding: 0 5px;
-            border-radius: 3px;
-        }
-        .kv-k { background: #BBDEFB; }
-        .kv-v { background: #FFCCBC; }
-        .kv-layer { background: #C8E6C9; }
-        .kv-block { background: #FFF9C4; }
-        .kv-slot { background: #E1BEE7; }
-        .kv-head { background: #B2EBF2; }
-        .kv-dim { background: #F5F5F5; }
-        .kv-dots {
-            margin: 0 5px;
-            color: #999;
-            font-weight: bold;
-        }
-        .kv-example {
-            margin-top: 25px;
-            padding: 15px;
-            background: #FAFAFA;
-            border-left: 4px solid #2196F3;
-            font-size: 13px;
-        }
-        .kv-code {
-            font-family: 'Consolas', monospace;
-            background: #ECEFF1;
-            padding: 2px 6px;
-            border-radius: 3px;
-        }
-    </style>
-</head>
-<body>
-    <div class="kv-container">
-        <div class="kv-title">KV Cache Tensor 维度结构</div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 0</strong> — K/V 选择器：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-k">0: Key</div>
-                <div class="kv-box kv-v">1: Value</div>
-            </div>
-        </div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 1</strong> — Transformer 层：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-layer">Layer 0</div>
-                <div class="kv-box kv-layer">Layer 1</div>
-                <span class="kv-dots">...</span>
-                <div class="kv-box kv-layer">Layer 27</div>
-            </div>
-        </div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 2</strong> — 物理 Block：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-block">Block 0</div>
-                <div class="kv-box kv-block">Block 1</div>
-                <span class="kv-dots">...</span>
-                <div class="kv-box kv-block">Block N</div>
-            </div>
-        </div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 3</strong> — Block 内槽位：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-slot">Slot 0</div>
-                <div class="kv-box kv-slot">Slot 1</div>
-                <span class="kv-dots">...</span>
-                <div class="kv-box kv-slot">Slot 255</div>
-            </div>
-        </div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 4</strong> — KV 头：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-head">Head 0</div>
-                <div class="kv-box kv-head">Head 1</div>
-                <span class="kv-dots">...</span>
-                <div class="kv-box kv-head">Head 7</div>
-            </div>
-        </div>
-        
-        <div class="kv-dim-row">
-            <div class="kv-dim-label"><strong>Dim 5</strong> — 头维度：</div>
-            <div class="kv-dim-boxes">
-                <div class="kv-box kv-dim">d₀</div>
-                <div class="kv-box kv-dim">d₁</div>
-                <span class="kv-dots">...</span>
-                <div class="kv-box kv-dim">d₁₂₇</div>
-            </div>
-        </div>
-        
-        <div class="kv-example">
-            <strong>Qwen3-0.6B 示例：</strong><br><br>
-            Shape: <span class="kv-code">[2, 28, N, 256, 8, 128]</span><br><br>
-            其中 N = num_kvcache_blocks，由可用显存自动计算<br><br>
-            单个 Block 显存：<span class="kv-code">2 × 28 × 256 × 8 × 128 × 2 = 29.36 MB</span><br><br>
-            若可用显存 4.6 GB → N ≈ <strong>160</strong> 个 Block
-        </div>
-    </div>
-</body>
-</html>
-```
+![图 3](../.assets/306dd6585d28e792e267ce164dbf97cd6755765b7dd15512b6d74107c55c93e7.png)  
+
 
 ### 3.5 Context 上下文（context.py）
 
@@ -817,172 +559,356 @@ Context 是运行时上下文的容器，保存 Attention 计算所需的各种�
 ```python
 @dataclass
 class Context:
-    is_prefill: bool = False                    # 当前是否为 Prefill 阶段
-    cu_seqlens_q: torch.Tensor | None = None    # Query 累积序列长度
-    cu_seqlens_k: torch.Tensor | None = None    # Key 累积序列长度
-    max_seqlen_q: int = 0                       # Query 最大序列长度
-    max_seqlen_k: int = 0                       # Key 最大序列长度
-    slot_mapping: torch.Tensor | None = None    # token → Cache 槽位映射
-    context_lens: torch.Tensor | None = None    # 每个序列的上下文长度（Decode）
-    block_tables: torch.Tensor | None = None    # 批量 block_table（Decode/Prefix Cache）
-```
+    """
+    运行时上下文，保存当前迭代的 Attention 计算所需信息。
+    
+    使用全局单例模式，通过 set_context/get_context/reset_context 访问。
+    这样 Attention 层可以无需修改接口即可获取调度信息。
+    """
+    
+    # is_prefill: 当前是否为 Prefill 阶段
+    # True: Prefill，处理完整 prompt
+    # False: Decode，处理单个 token
+    is_prefill: bool = False
+    
+    # cu_seqlens_q: Query 的累积序列长度（仅 Prefill 使用）
+    # 例如 [0, 100, 250, 400] 表示 3 个序列，长度分别为 100, 150, 150
+    # flash_attn_varlen_func 需要此参数处理变长序列拼接
+    cu_seqlens_q: torch.Tensor | None = None
+    
+    # cu_seqlens_k: Key 的累积序列长度（仅 Prefill 使用）
+    # 通常与 cu_seqlens_q 相同，但 Prefix Cache 时可能不同
+    # （Query 只包含非缓存 token，Key 包含全部）
+    cu_seqlens_k: torch.Tensor | None = None
+    
+    # max_seqlen_q: 批次中最长的 Query 序列长度（仅 Prefill 使用）
+    max_seqlen_q: int = 0
+    
+    # max_seqlen_k: 批次中最长的 Key 序列长度（仅 Prefill 使用）
+    max_seqlen_k: int = 0
+    
+    # slot_mapping: token 到 KV Cache 槽位的映射（Prefill 和 Decode 都使用）
+    # Prefill: 长度 = 非缓存 token 总数
+    # Decode: 长度 = batch_size（每个序列一个新 token）
+    # 槽位计算: block_id * block_size + offset_in_block
+    slot_mapping: torch.Tensor | None = None
+    
+    # context_lens: 每个序列的上下文长度（仅 Decode 使用）
+    # flash_attn_with_kvcache 需要知道每个序列要读取多少历史 KV
+    context_lens: torch.Tensor | None = None
+    
+    # block_tables: 批量 block_table（Decode 和 Prefix Cache 时使用）
+    # 形状: [batch_size, max_blocks]
+    # 每行是一个序列的 block_table，不足部分填充 -1
+    block_tables: torch.Tensor | None = None
 
-**字段详解**：
 
-| 字段 | Prefill 阶段 | Decode 阶段 | 说明 |
-|------|-------------|-------------|------|
-| `is_prefill` | True | False | 区分阶段 |
-| `cu_seqlens_q` | ✅ 使用 | ❌ 不使用 | 累积序列长度，如 [0, 100, 250, 400] |
-| `cu_seqlens_k` | ✅ 使用 | ❌ 不使用 | 与 cu_seqlens_q 类似，Prefix Cache 时可能不同 |
-| `max_seqlen_q` | ✅ 使用 | ❌ 不使用 | 批次中最长的 Query 长度 |
-| `max_seqlen_k` | ✅ 使用 | ❌ 不使用 | 批次中最长的 Key 长度 |
-| `slot_mapping` | ✅ 使用 | ✅ 使用 | token 在 KV Cache 中的槽位 |
-| `context_lens` | ❌ 不使用 | ✅ 使用 | 每个序列的总长度 |
-| `block_tables` | Prefix Cache 时使用 | ✅ 使用 | 2D Tensor，每行是一个 block_table |
+# 全局上下文实例
+_CONTEXT = Context()
 
-**设置与获取**：
 
-```python
-# 设置上下文
-set_context(
-    is_prefill=True,
-    cu_seqlens_q=cu_seqlens_q,
-    cu_seqlens_k=cu_seqlens_k,
-    max_seqlen_q=max_seqlen_q,
-    max_seqlen_k=max_seqlen_k,
-    slot_mapping=slot_mapping,
-    block_tables=block_tables
-)
+def get_context():
+    """获取当前上下文（在 Attention.forward 中调用）"""
+    return _CONTEXT
 
-# 获取上下文（在 Attention 中调用）
-context = get_context()
-if context.is_prefill:
-    # Prefill 逻辑
-else:
-    # Decode 逻辑
 
-# 重置上下文
-reset_context()
+def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, 
+                max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, 
+                context_lens=None, block_tables=None):
+    """
+    设置上下文（在 ModelRunner.prepare_prefill/prepare_decode 中调用）
+    """
+    global _CONTEXT
+    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, 
+                       max_seqlen_q, max_seqlen_k, slot_mapping, 
+                       context_lens, block_tables)
+
+
+def reset_context():
+    """重置上下文（在 ModelRunner.run 结束时调用）"""
+    global _CONTEXT
+    _CONTEXT = Context()
 ```
 
 ### 3.6 Attention 层的 KV Cache 操作（attention.py）
 
-#### 3.6.1 `store_kvcache_kernel`：Triton Kernel
-
-将 K、V 向量写入 KV Cache 的指定槽位。
-
 ```python
 @triton.jit
 def store_kvcache_kernel(
-    key_ptr,            # 输入 K 的指针
-    key_stride,         # K 的步长
-    value_ptr,          # 输入 V 的指针
-    value_stride,       # V 的步长
-    k_cache_ptr,        # K Cache 的指针
-    v_cache_ptr,        # V Cache 的指针
+    key_ptr,            # 输入 K 张量的指针
+    key_stride,         # K 张量在 token 维度的步长
+    value_ptr,          # 输入 V 张量的指针
+    value_stride,       # V 张量在 token 维度的步长
+    k_cache_ptr,        # K Cache 张量的指针
+    v_cache_ptr,        # V Cache 张量的指针
     slot_mapping_ptr,   # slot_mapping 的指针
     D: tl.constexpr,    # 每个 token 的 KV 维度 (num_heads * head_dim)
 ):
-    idx = tl.program_id(0)                      # 当前 token 索引
-    slot = tl.load(slot_mapping_ptr + idx)      # 目标槽位
-    if slot == -1: return                       # 无效位置跳过
+    """
+    Triton Kernel：将 K、V 向量写入 KV Cache 的指定槽位。
     
-    # 加载 K/V
-    key = tl.load(key_ptr + idx * key_stride + tl.arange(0, D))
-    value = tl.load(value_ptr + idx * value_stride + tl.arange(0, D))
+    为什么用 Triton 而非 PyTorch：
+    1. slot_mapping 指定的位置不连续，PyTorch 索引操作效率低
+    2. Triton 可以并行处理所有 token，每个 token 一个线程块
+    3. 合并读写，减少显存带宽压力
+    """
+    # 当前处理的 token 索引（每个线程块处理一个 token）
+    idx = tl.program_id(0)
+    
+    # 获取目标槽位
+    slot = tl.load(slot_mapping_ptr + idx)
+    
+    # slot = -1 是 CUDA Graph 填充的无效位置，跳过
+    if slot == -1:
+        return
+    
+    # 从输入张量加载 K 和 V
+    key_offsets = idx * key_stride + tl.arange(0, D)
+    value_offsets = idx * value_stride + tl.arange(0, D)
+    key = tl.load(key_ptr + key_offsets)
+    value = tl.load(value_ptr + value_offsets)
     
     # 写入 Cache
-    tl.store(k_cache_ptr + slot * D + tl.arange(0, D), key)
-    tl.store(v_cache_ptr + slot * D + tl.arange(0, D), value)
-```
+    cache_offsets = slot * D + tl.arange(0, D)
+    tl.store(k_cache_ptr + cache_offsets, key)
+    tl.store(v_cache_ptr + cache_offsets, value)
 
-**使用 Triton 的原因**：
-- slot_mapping 指定的位置不连续，PyTorch 索引操作效率低
-- Triton 可以并行处理所有 token，减少 Kernel 启动开销
 
-#### 3.6.2 `store_kvcache()` Python 封装
-
-```python
-def store_kvcache(key, value, k_cache, v_cache, slot_mapping):
+def store_kvcache(key: torch.Tensor, value: torch.Tensor, 
+                  k_cache: torch.Tensor, v_cache: torch.Tensor, 
+                  slot_mapping: torch.Tensor):
+    """
+    Python 封装：调用 Triton Kernel 写入 KV Cache。
+    
+    Args:
+        key: 当前计算的 K，形状 [N, num_heads, head_dim]
+        value: 当前计算的 V，形状 [N, num_heads, head_dim]
+        k_cache: K Cache，形状 [num_blocks, block_size, num_heads, head_dim]
+        v_cache: V Cache，形状同上
+        slot_mapping: 槽位映射，形状 [N]
+    """
     N, num_heads, head_dim = key.shape
     D = num_heads * head_dim
+    # 验证张量布局
+    assert key.stride(-1) == 1 and value.stride(-1) == 1
+    assert key.stride(1) == head_dim and value.stride(1) == head_dim
+    assert k_cache.stride(1) == D and v_cache.stride(1) == D
+    assert slot_mapping.numel() == N
+    # 启动 Kernel，每个 token 一个线程块
     store_kvcache_kernel[(N,)](
-        key, key.stride(0),
-        value, value.stride(0),
-        k_cache, v_cache,
+        key, key.stride(0), 
+        value, value.stride(0), 
+        k_cache, v_cache, 
         slot_mapping, D
     )
+
+
+class Attention(nn.Module):
+    """
+    Attention 层，集成 KV Cache 的读写和 Attention 计算。
+    
+    支持两种模式：
+    1. Prefill: 使用 flash_attn_varlen_func 处理变长序列
+    2. Decode: 使用 flash_attn_with_kvcache 处理单 token
+    """
+
+    def __init__(self, num_heads, head_dim, scale, num_kv_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scale = scale
+        self.num_kv_heads = num_kv_heads
+        # k_cache 和 v_cache 在 ModelRunner.allocate_kv_cache 中绑定
+        self.k_cache = self.v_cache = torch.tensor([])
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        """
+        执行 Attention 计算。
+        
+        Args:
+            q: Query，形状 [N, num_heads, head_dim]
+            k: Key，形状 [N, num_kv_heads, head_dim]
+            v: Value，形状同上
+        
+        Returns:
+            输出，形状同 q
+        """
+        # 获取当前上下文
+        context = get_context()
+        k_cache, v_cache = self.k_cache, self.v_cache
+        
+        # 1. 将当前计算的 K、V 写入 Cache
+        if k_cache.numel() and v_cache.numel():
+            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        
+        # 2. 根据阶段选择 Attention 计算方式
+        if context.is_prefill:
+            # Prefill 阶段
+            if context.block_tables is not None:
+                # Prefix Cache 命中：从 Cache 读取历史 KV
+                # 传入的 k, v 只包含新计算的 token
+                # flash_attn 内部会根据 block_table 拼接历史 KV
+                k, v = k_cache, v_cache
+            
+            o = flash_attn_varlen_func(
+                q, k, v,
+                max_seqlen_q=context.max_seqlen_q,
+                cu_seqlens_q=context.cu_seqlens_q,
+                max_seqlen_k=context.max_seqlen_k,
+                cu_seqlens_k=context.cu_seqlens_k,
+                softmax_scale=self.scale,
+                causal=True,
+                block_table=context.block_tables
+            )
+        else:
+            # Decode 阶段
+            # q: [batch_size, num_heads, head_dim] -> [batch_size, 1, num_heads, head_dim]
+            o = flash_attn_with_kvcache(
+                q.unsqueeze(1),
+                k_cache, v_cache,
+                cache_seqlens=context.context_lens,  # 每个序列的历史长度
+                block_table=context.block_tables,     # 定位 Cache 中的 KV
+                softmax_scale=self.scale,
+                causal=True
+            )
+        return o
 ```
 
-#### 3.6.3 `Attention.forward()`
-
-根据阶段选择不同的 flash_attn 函数。
-
-```python
-def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
-    context = get_context()
-    k_cache, v_cache = self.k_cache, self.v_cache
-    
-    # 1. 写入 KV Cache
-    if k_cache.numel() and v_cache.numel():
-        store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-    
-    # 2. 计算 Attention
-    if context.is_prefill:
-        if context.block_tables is not None:  # Prefix Cache
-            k, v = k_cache, v_cache
-        o = flash_attn_varlen_func(
-            q, k, v,
-            cu_seqlens_q=context.cu_seqlens_q,
-            cu_seqlens_k=context.cu_seqlens_k,
-            max_seqlen_q=context.max_seqlen_q,
-            max_seqlen_k=context.max_seqlen_k,
-            softmax_scale=self.scale,
-            causal=True,
-            block_table=context.block_tables
-        )
-    else:  # Decode
-        o = flash_attn_with_kvcache(
-            q.unsqueeze(1),
-            k_cache, v_cache,
-            cache_seqlens=context.context_lens,
-            block_table=context.block_tables,
-            softmax_scale=self.scale,
-            causal=True
-        )
-    return o
-```
-
-**两种 flash_attn 函数对比**：
-
-| 函数 | 适用阶段 | Q 形状 | KV 来源 | 特点 |
-|------|----------|--------|---------|------|
-| `flash_attn_varlen_func` | Prefill | 变长拼接 | 输入或 Cache | 支持变长序列批处理 |
-| `flash_attn_with_kvcache` | Decode | [B, 1, H, D] | 仅 Cache | 针对单 token 优化 |
-
-### 3.7 Scheduler 中的 Block 相关调用（scheduler.py）
-
-Scheduler 是调度的核心，决定何时调用 BlockManager 的各个方法。
+### 3.7 Scheduler 调度器（scheduler.py）
 
 ```python
 class Scheduler:
+    """
+    调度器，决定每次迭代执行哪些 Sequence。
+    
+    核心职责：
+    1. 管理 waiting 和 running 队列
+    2. 调用 BlockManager 分配/回收 Block
+    3. 实现 Prefill 优先和抢占机制
+    """
+
     def __init__(self, config: Config):
+        self.max_num_seqs = config.max_num_seqs
+        self.max_num_batched_tokens = config.max_num_batched_tokens
+        self.eos = config.eos
+        
+        # BlockManager 实例
         self.block_manager = BlockManager(config.num_kvcache_blocks, 
                                           config.kvcache_block_size)
-        self.waiting: deque[Sequence] = deque()  # 等待队列
-        self.running: deque[Sequence] = deque()  # 运行队列
+        
+        # waiting: 等待执行的新请求队列
+        self.waiting: deque[Sequence] = deque()
+        
+        # running: 正在执行的请求队列（已完成 Prefill，在 Decode）
+        self.running: deque[Sequence] = deque()
+
+    def is_finished(self):
+        """检查是否所有请求都已完成"""
+        return not self.waiting and not self.running
+
+    def add(self, seq: Sequence):
+        """添加新请求到等待队列"""
+        self.waiting.append(seq)
+
+    def schedule(self) -> tuple[list[Sequence], bool]:
+        """
+        调度方法，选择本次迭代要执行的 Sequence。
+        
+        调度策略：
+        1. Prefill 优先：先处理 waiting 队列中的新请求
+        2. 资源不足时：Prefill 跳过等待，Decode 抢占
+        
+        Returns:
+            (scheduled_seqs, is_prefill): 被调度的序列列表和是否为 Prefill 阶段
+        """
+        scheduled_seqs = []
+        num_seqs = 0
+        num_batched_tokens = 0
+        
+        # ========== Prefill 调度 ==========
+        while self.waiting and num_seqs < self.max_num_seqs:
+            seq = self.waiting[0]
+            
+            # 检查 token 数量限制
+            if num_batched_tokens + len(seq) > self.max_num_batched_tokens:
+                break
+            
+            # 检查 Block 是否足够
+            if not self.block_manager.can_allocate(seq):
+                break
+            
+            # 分配 Block
+            num_seqs += 1
+            self.block_manager.allocate(seq)
+            
+            # 更新 token 计数（只计算非缓存 token）
+            num_batched_tokens += len(seq) - seq.num_cached_tokens
+            
+            # 状态转移：WAITING -> RUNNING
+            seq.status = SequenceStatus.RUNNING
+            self.waiting.popleft()
+            self.running.append(seq)
+            scheduled_seqs.append(seq)
+        
+        # 如果有 Prefill 请求，直接返回
+        if scheduled_seqs:
+            return scheduled_seqs, True  # is_prefill = True
+        
+        # ========== Decode 调度 ==========
+        while self.running and num_seqs < self.max_num_seqs:
+            seq = self.running.popleft()
+            
+            # 检查是否能追加新 token
+            while not self.block_manager.can_append(seq):
+                # 资源不足，需要抢占
+                if self.running:
+                    # 抢占最后进入的请求（LIFO 策略）
+                    self.preempt(self.running.pop())
+                else:
+                    # 无法继续，抢占自己
+                    self.preempt(seq)
+                    break
+            else:
+                # 可以继续执行
+                num_seqs += 1
+                self.block_manager.may_append(seq)
+                scheduled_seqs.append(seq)
+        
+        # 将调度的序列放回队首
+        assert scheduled_seqs
+        self.running.extendleft(reversed(scheduled_seqs))
+        return scheduled_seqs, False  # is_prefill = False
+
+    def preempt(self, seq: Sequence):
+        """
+        抢占：暂停一个正在执行的 Sequence，释放其资源。
+        
+        被抢占的 Sequence 会回到 waiting 队列头部，
+        等待资源可用时优先恢复执行。
+        """
+        seq.status = SequenceStatus.WAITING
+        self.block_manager.deallocate(seq)  # 释放所有 Block
+        self.waiting.appendleft(seq)         # 放到等待队列头部
+
+    def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
+        """
+        后处理：更新 Sequence 状态，检查终止条件。
+        
+        在每次迭代后调用，处理采样结果。
+        """
+        for seq, token_id in zip(seqs, token_ids):
+            # 追加新 token
+            seq.append_token(token_id)
+            
+            # 检查终止条件
+            is_eos = not seq.ignore_eos and token_id == self.eos
+            is_max_tokens = seq.num_completion_tokens == seq.max_tokens
+            
+            if is_eos or is_max_tokens:
+                seq.status = SequenceStatus.FINISHED
+                self.block_manager.deallocate(seq)  # 释放 Block
+                self.running.remove(seq)
 ```
-
-**方法调用时机**：
-
-| 方法 | 调用位置 | 触发条件 |
-|------|----------|----------|
-| `can_allocate` | `schedule()` | Prefill 阶段检查 |
-| `allocate` | `schedule()` | 新请求开始执行 |
-| `can_append` | `schedule()` | Decode 阶段检查 |
-| `may_append` | `schedule()` | Decode 阶段每次迭代 |
-| `deallocate` | `preempt()` | 抢占时释放 |
-| `deallocate` | `postprocess()` | 请求完成时释放 |
 
 ---
 
@@ -1120,53 +1046,19 @@ Prefill 阶段处理新请求的 prompt，一次性计算所有 prompt token 的
 </html>
 ```
 
-### 4.2 Step 1：请求进入调度（Scheduler.schedule）
+### 4.2 Step 1-2：调度与 Block 分配
 
-```python
-def schedule(self) -> tuple[list[Sequence], bool]:
-    scheduled_seqs = []
-    num_seqs = 0
-    num_batched_tokens = 0
-    
-    # Prefill 调度
-    while self.waiting and num_seqs < self.max_num_seqs:
-        seq = self.waiting[0]
-        
-        # 检查 token 数量限制
-        if num_batched_tokens + len(seq) > self.max_num_batched_tokens:
-            break
-        
-        # 检查 Block 是否足够
-        if not self.block_manager.can_allocate(seq):
-            break
-        
-        # 分配 Block
-        num_seqs += 1
-        self.block_manager.allocate(seq)
-        
-        # 更新计数（只计算非缓存 token）
-        num_batched_tokens += len(seq) - seq.num_cached_tokens
-        
-        # 状态转移
-        seq.status = SequenceStatus.RUNNING
-        self.waiting.popleft()
-        self.running.append(seq)
-        scheduled_seqs.append(seq)
-    
-    if scheduled_seqs:
-        return scheduled_seqs, True  # is_prefill = True
-    
-    # 无 Prefill 请求，尝试 Decode...
-```
+Scheduler 从 waiting 队列取出新请求，调用 BlockManager.allocate 分配 Block。
 
-**Prefix Caching 的命中处理**：
+在 `allocate` 内部，会进行 Prefix Caching 的匹配：
+- 逐个 Block 计算链式 hash
+- 在 `hash_to_block_id` 中查找匹配
+- 命中则复用，增加 `ref_count`，累加 `num_cached_tokens`
+- 未命中则从 `free_block_ids` 分配新 Block
 
-在 `allocate` 内部，如果检测到缓存命中：
-1. 复用已有 Block，增加其 `ref_count`
-2. 累加 `seq.num_cached_tokens`
-3. 后续 `prepare_prefill` 会利用这个信息跳过缓存 token
+### 4.3 Step 3：准备运行时上下文
 
-### 4.3 Step 2：准备运行时上下文（ModelRunner.prepare_prefill）
+ModelRunner.prepare_prefill 根据 Sequence 信息构造 Attention 所需的上下文：
 
 ```python
 def prepare_prefill(self, seqs: list[Sequence]):
@@ -1174,28 +1066,24 @@ def prepare_prefill(self, seqs: list[Sequence]):
     positions = []
     cu_seqlens_q = [0]
     cu_seqlens_k = [0]
-    max_seqlen_q = 0
-    max_seqlen_k = 0
     slot_mapping = []
-    block_tables = None
     
     for seq in seqs:
         seqlen = len(seq)
         
-        # 只包含非缓存的 token
+        # 只包含非缓存的 token（Prefix Cache 优化）
         input_ids.extend(seq[seq.num_cached_tokens:])
         positions.extend(list(range(seq.num_cached_tokens, seqlen)))
         
-        # 计算序列长度
-        seqlen_q = seqlen - seq.num_cached_tokens  # Query 长度（非缓存）
-        seqlen_k = seqlen                           # Key 长度（全部）
+        # Query 长度：非缓存 token 数
+        seqlen_q = seqlen - seq.num_cached_tokens
+        # Key 长度：全部 token 数（包括缓存的）
+        seqlen_k = seqlen
         
         cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
         cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
-        max_seqlen_q = max(seqlen_q, max_seqlen_q)
-        max_seqlen_k = max(seqlen_k, max_seqlen_k)
         
-        # 构造 slot_mapping（只为非缓存 token）
+        # 构造 slot_mapping：只为非缓存 token 生成
         for i in range(seq.num_cached_blocks, seq.num_blocks):
             start = seq.block_table[i] * self.block_size
             end = start + (self.block_size if i != seq.num_blocks - 1 
@@ -1206,15 +1094,8 @@ def prepare_prefill(self, seqs: list[Sequence]):
     if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
         block_tables = self.prepare_block_tables(seqs)
     
-    # 转换为 Tensor
-    input_ids = torch.tensor(input_ids, dtype=torch.int64).cuda()
-    positions = torch.tensor(positions, dtype=torch.int64).cuda()
-    # ... 其他转换 ...
-    
-    # 设置上下文
-    set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
-                slot_mapping, None, block_tables)
-    
+    # 设置全局上下文
+    set_context(True, cu_seqlens_q, cu_seqlens_k, ...)
     return input_ids, positions
 ```
 
@@ -1305,8 +1186,8 @@ def prepare_prefill(self, seqs: list[Sequence]):
             <div class="slot-label">Block 划分：</div>
             <div class="slot-cells">
                 <div style="width: 160px; text-align: center; font-size: 11px; color: #999;">Block 0-1 (缓存命中)</div>
-                <div style="width: 80px; text-align: center; font-size: 11px; color: #4CAF50;">Block 2 (新)</div>
-                <div style="width: 80px; text-align: center; font-size: 11px; color: #4CAF50;">Block 3 (新)</div>
+                <div style="width: 80px; text-align: center; font-size: 11px; color: #4CAF50;">Block 2</div>
+                <div style="width: 80px; text-align: center; font-size: 11px; color: #4CAF50;">Block 3</div>
             </div>
         </div>
         
@@ -1316,9 +1197,9 @@ def prepare_prefill(self, seqs: list[Sequence]):
         </div>
         
         <div class="slot-result">
-            <strong>slot_mapping 计算过程：</strong><br><br>
-            Block 2 (physical=3): slots = [3×4, 3×4+1, 3×4+2, 3×4+3] = [12, 13, 14, 15]<br>
-            Block 3 (physical=12): slots = [12×4, 12×4+1] = [48, 49]<br><br>
+            <strong>slot_mapping 计算：</strong><br><br>
+            Block 2 (physical=3): slots = [3×4+0, 3×4+1, 3×4+2, 3×4+3] = [12, 13, 14, 15]<br>
+            Block 3 (physical=12): slots = [12×4+0, 12×4+1] = [48, 49]<br><br>
             <strong>最终：</strong> slot_mapping = [12, 13, 14, 15, 48, 49]
         </div>
         
@@ -1331,190 +1212,12 @@ def prepare_prefill(self, seqs: list[Sequence]):
 </html>
 ```
 
-### 4.4 Step 3：执行 Attention（Attention.forward）
+### 4.4 Step 4-6：Attention 计算与采样
 
-```python
-def forward(self, q, k, v):
-    context = get_context()
-    
-    # 1. 写入 KV Cache
-    store_kvcache(k, v, self.k_cache, self.v_cache, context.slot_mapping)
-    
-    # 2. 计算 Attention
-    if context.block_tables is not None:
-        # Prefix Cache 命中：从 Cache 读取历史 KV
-        k, v = self.k_cache, self.v_cache
-    
-    o = flash_attn_varlen_func(
-        q, k, v,
-        cu_seqlens_q=context.cu_seqlens_q,
-        cu_seqlens_k=context.cu_seqlens_k,
-        max_seqlen_q=context.max_seqlen_q,
-        max_seqlen_k=context.max_seqlen_k,
-        softmax_scale=self.scale,
-        causal=True,
-        block_table=context.block_tables
-    )
-    return o
-```
-
-**Prefix Cache 命中时的特殊处理**：
-
-当发生 Prefix Cache 命中时：
-- `cu_seqlens_q`（Query 累积长度）< `cu_seqlens_k`（Key 累积长度）
-- 传入的 `k, v` 只包含新计算的 token
-- 通过 `block_tables` 参数，flash_attn 会从 Cache 中读取历史 KV
-- 内部拼接历史 KV 和新 KV 进行 Attention 计算
-
-### 4.5 Step 4：采样与状态更新
-
-```python
-# ModelRunner.run
-logits = self.run_model(input_ids, positions, is_prefill)
-token_ids = self.sampler(logits, temperatures).tolist()
-
-# Scheduler.postprocess
-def postprocess(self, seqs, token_ids):
-    for seq, token_id in zip(seqs, token_ids):
-        seq.append_token(token_id)  # 追加新 token
-        
-        # 检查终止条件
-        if (not seq.ignore_eos and token_id == self.eos) or \
-           seq.num_completion_tokens == seq.max_tokens:
-            seq.status = SequenceStatus.FINISHED
-            self.block_manager.deallocate(seq)
-            self.running.remove(seq)
-```
-
-### 4.6 完整流程图
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .flow-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .flow-title {
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 25px;
-            text-align: center;
-        }
-        .flow-diagram {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-        }
-        .flow-column {
-            width: 30%;
-        }
-        .flow-col-title {
-            font-weight: bold;
-            text-align: center;
-            padding: 8px;
-            margin-bottom: 15px;
-            border-radius: 5px;
-        }
-        .flow-item {
-            padding: 10px;
-            margin-bottom: 10px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-            font-size: 11px;
-            text-align: center;
-        }
-        .flow-arrow-h {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 5px;
-            color: #666;
-        }
-        .flow-data {
-            font-size: 10px;
-            color: #666;
-            text-align: center;
-            padding: 5px;
-            background: #FAFAFA;
-            margin: 5px 0;
-            border-radius: 3px;
-        }
-    </style>
-</head>
-<body>
-    <div class="flow-container">
-        <div class="flow-title">Prefill 阶段数据流转图</div>
-        <div class="flow-diagram">
-            <div class="flow-column">
-                <div class="flow-col-title" style="background: #E3F2FD;">调度层</div>
-                <div class="flow-item" style="background: #E3F2FD;">
-                    <strong>Scheduler.schedule()</strong><br>
-                    从 waiting 取出 Sequence
-                </div>
-                <div class="flow-arrow-h">↓</div>
-                <div class="flow-item" style="background: #FFF3E0;">
-                    <strong>BlockManager.allocate()</strong><br>
-                    分配 Block，更新 block_table
-                </div>
-                <div class="flow-data">
-                    block_table = [7, 3, 12]<br>
-                    num_cached_tokens = 512
-                </div>
-            </div>
-            
-            <div class="flow-arrow-h" style="font-size: 24px; padding-top: 80px;">→</div>
-            
-            <div class="flow-column">
-                <div class="flow-col-title" style="background: #FCE4EC;">执行层</div>
-                <div class="flow-item" style="background: #FCE4EC;">
-                    <strong>ModelRunner.prepare_prefill()</strong><br>
-                    构造 slot_mapping, cu_seqlens
-                </div>
-                <div class="flow-data">
-                    input_ids: [N_new] tokens<br>
-                    slot_mapping: [N_new] slots
-                </div>
-                <div class="flow-arrow-h">↓</div>
-                <div class="flow-item" style="background: #E0F7FA;">
-                    <strong>Attention.forward()</strong><br>
-                    store_kvcache + flash_attn
-                </div>
-                <div class="flow-data">
-                    KV Cache 写入完成<br>
-                    输出 hidden_states
-                </div>
-            </div>
-            
-            <div class="flow-arrow-h" style="font-size: 24px; padding-top: 80px;">→</div>
-            
-            <div class="flow-column">
-                <div class="flow-col-title" style="background: #E8F5E9;">输出层</div>
-                <div class="flow-item" style="background: #E8F5E9;">
-                    <strong>LMHead + Sampler</strong><br>
-                    计算 logits，采样 token
-                </div>
-                <div class="flow-data">
-                    new_token_id = 12345
-                </div>
-                <div class="flow-arrow-h">↓</div>
-                <div class="flow-item" style="background: #F3E5F5;">
-                    <strong>Scheduler.postprocess()</strong><br>
-                    追加 token，检查终止
-                </div>
-                <div class="flow-data">
-                    seq.num_tokens += 1<br>
-                    进入 Decode 阶段
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-```
+1. **Attention.forward** 调用 `store_kvcache` 将新计算的 KV 写入 Cache
+2. 调用 `flash_attn_varlen_func` 进行 Attention 计算
+3. **Sampler** 对 logits 采样，生成第一个 token
+4. **postprocess** 将新 token 追加到 Sequence
 
 ---
 
@@ -1529,38 +1232,32 @@ Decode 阶段逐个生成 token，每次迭代只处理一个 token，但可以�
 | 方面 | Prefill | Decode |
 |------|---------|--------|
 | Token 数量 | 多个（整个 prompt） | 每个 Sequence 1 个 |
-| Block 操作 | allocate（分配多个） | may_append（可能追加 1 个） |
+| Block 操作 | allocate（分配多个） | may_append（追加 0~1 个） |
 | Attention 函数 | flash_attn_varlen_func | flash_attn_with_kvcache |
 | slot_mapping | 多个 slot | 每个 Sequence 1 个 slot |
 | 资源不足处理 | 跳过等待 | 抢占其他请求 |
 
-### 5.2 Step 1：调度与 Block 追加（Scheduler.schedule）
+### 5.2 调度与 Block 追加
 
 ```python
-def schedule(self):
-    # ... Prefill 调度返回空时，进入 Decode 调度 ...
+# Scheduler.schedule() 中的 Decode 部分
+while self.running and num_seqs < self.max_num_seqs:
+    seq = self.running.popleft()
     
-    while self.running and num_seqs < self.max_num_seqs:
-        seq = self.running.popleft()
-        
-        # 检查是否能追加
-        while not self.block_manager.can_append(seq):
-            # 资源不足，需要抢占
-            if self.running:
-                self.preempt(self.running.pop())  # 抢占最后进入的
-            else:
-                self.preempt(seq)  # 无法继续，抢占自己
-                break
+    # 检查是否能追加
+    while not self.block_manager.can_append(seq):
+        if self.running:
+            self.preempt(self.running.pop())  # 抢占
         else:
-            num_seqs += 1
-            self.block_manager.may_append(seq)
-            scheduled_seqs.append(seq)
-    
-    self.running.extendleft(reversed(scheduled_seqs))
-    return scheduled_seqs, False  # is_prefill = False
+            self.preempt(seq)
+            break
+    else:
+        num_seqs += 1
+        self.block_manager.may_append(seq)
+        scheduled_seqs.append(seq)
 ```
 
-**`may_append` 的三种情况**：
+**may_append 的三种情况**：
 
 ```html
 <!DOCTYPE html>
@@ -1614,9 +1311,6 @@ def schedule(self):
             border: 1px solid #666;
             margin: 1px;
             display: inline-block;
-            font-size: 8px;
-            text-align: center;
-            line-height: 15px;
         }
         .append-slot-used { background: #81C784; }
         .append-slot-new { background: #FFD54F; }
@@ -1629,18 +1323,11 @@ def schedule(self):
             background: #F5F5F5;
             border-radius: 4px;
         }
-        .append-code {
-            font-family: 'Consolas', monospace;
-            background: #ECEFF1;
-            padding: 2px 5px;
-            border-radius: 3px;
-            font-size: 11px;
-        }
     </style>
 </head>
 <body>
     <div class="append-container">
-        <div class="append-title">may_append 的三种情况（假设 block_size = 4）</div>
+        <div class="append-title">may_append 的三种情况（block_size = 4）</div>
         
         <div class="append-case">
             <div class="append-case-title">情况 1：需要新 Block（len % block_size == 1）</div>
@@ -1648,16 +1335,16 @@ def schedule(self):
                 <div class="append-block append-full">
                     Block 0<br>
                     <div>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
                     </div>
                 </div>
                 <div class="append-block append-new">
                     Block 1 (新)<br>
                     <div>
-                        <span class="append-slot append-slot-new">★</span>
+                        <span class="append-slot append-slot-new"></span>
                         <span class="append-slot append-slot-empty"></span>
                         <span class="append-slot append-slot-empty"></span>
                         <span class="append-slot append-slot-empty"></span>
@@ -1665,8 +1352,8 @@ def schedule(self):
                 </div>
             </div>
             <div class="append-action">
-                <span class="append-code">len(seq) = 5</span>，上一个 Block 已满<br>
-                操作：从 free_block_ids 分配新 Block，追加到 block_table
+                len(seq) = 5，上一个 Block 已满<br>
+                操作：从 free_block_ids 分配新 Block
             </div>
         </div>
         
@@ -1676,16 +1363,16 @@ def schedule(self):
                 <div class="append-block append-full">
                     Block 0<br>
                     <div>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-new">★</span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-new"></span>
                     </div>
                 </div>
             </div>
             <div class="append-action">
-                <span class="append-code">len(seq) = 4</span>，Block 0 刚好填满<br>
-                操作：计算 Block 0 的 hash，注册到 hash_to_block_id（供后续 Prefix Cache）
+                len(seq) = 4，Block 刚好填满<br>
+                操作：计算 hash 并注册，供后续 Prefix Cache
             </div>
         </div>
         
@@ -1695,16 +1382,16 @@ def schedule(self):
                 <div class="append-block append-partial">
                     Block 0<br>
                     <div>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-used">✓</span>
-                        <span class="append-slot append-slot-new">★</span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-used"></span>
+                        <span class="append-slot append-slot-new"></span>
                         <span class="append-slot append-slot-empty"></span>
                     </div>
                 </div>
             </div>
             <div class="append-action">
-                <span class="append-code">len(seq) = 3</span>，Block 0 还有空位<br>
-                操作：无需任何操作，新 token 直接写入现有 Block
+                len(seq) = 3，Block 还有空位<br>
+                操作：无需任何操作
             </div>
         </div>
     </div>
@@ -1712,7 +1399,7 @@ def schedule(self):
 </html>
 ```
 
-### 5.3 Step 2：准备运行时上下文（ModelRunner.prepare_decode）
+### 5.3 准备运行时上下文
 
 ```python
 def prepare_decode(self, seqs: list[Sequence]):
@@ -1728,140 +1415,19 @@ def prepare_decode(self, seqs: list[Sequence]):
         context_lens.append(len(seq))
         
         # 计算新 token 的 slot
-        slot = seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+        slot = (seq.block_table[-1] * self.block_size + 
+                seq.last_block_num_tokens - 1)
         slot_mapping.append(slot)
-    
-    # 转换为 Tensor
-    input_ids = torch.tensor(input_ids, dtype=torch.int64).cuda()
-    positions = torch.tensor(positions, dtype=torch.int64).cuda()
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32).cuda()
-    context_lens = torch.tensor(context_lens, dtype=torch.int32).cuda()
     
     # 构造批量 block_tables
     block_tables = self.prepare_block_tables(seqs)
     
-    # 设置上下文
     set_context(False, slot_mapping=slot_mapping, 
                 context_lens=context_lens, block_tables=block_tables)
-    
     return input_ids, positions
 ```
 
-**Decode slot_mapping 示意**：
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .decode-slot-container {
-            background-color: white;
-            padding: 25px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .decode-slot-title {
-            font-size: 14px;
-            font-weight: bold;
-            margin-bottom: 15px;
-        }
-        .decode-slot-row {
-            display: flex;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-        .decode-slot-label {
-            width: 120px;
-            font-size: 12px;
-            font-weight: bold;
-        }
-        .decode-slot-value {
-            font-size: 12px;
-        }
-        .decode-slot-formula {
-            margin-top: 15px;
-            padding: 12px;
-            background: #E3F2FD;
-            border-radius: 5px;
-            font-family: 'Consolas', monospace;
-            font-size: 12px;
-        }
-    </style>
-</head>
-<body>
-    <div class="decode-slot-container">
-        <div class="decode-slot-title">Decode 阶段 slot_mapping 计算（单 token）</div>
-        
-        <div class="decode-slot-row">
-            <div class="decode-slot-label">假设条件：</div>
-            <div class="decode-slot-value">len(seq) = 11, block_size = 4, block_table = [7, 3, 12]</div>
-        </div>
-        
-        <div class="decode-slot-row">
-            <div class="decode-slot-label">最后一个 Block：</div>
-            <div class="decode-slot-value">block_table[-1] = 12</div>
-        </div>
-        
-        <div class="decode-slot-row">
-            <div class="decode-slot-label">Block 内位置：</div>
-            <div class="decode-slot-value">last_block_num_tokens = 11 - 2×4 = 3（第 3 个槽位，索引为 2）</div>
-        </div>
-        
-        <div class="decode-slot-formula">
-            slot = block_table[-1] × block_size + last_block_num_tokens - 1<br>
-            &nbsp;&nbsp;&nbsp;&nbsp; = 12 × 4 + 3 - 1<br>
-            &nbsp;&nbsp;&nbsp;&nbsp; = <strong>50</strong>
-        </div>
-    </div>
-</body>
-</html>
-```
-
-### 5.4 Step 3：执行 Attention（Attention.forward）
-
-```python
-def forward(self, q, k, v):
-    context = get_context()
-    
-    # 1. 写入单个 token 的 KV
-    store_kvcache(k, v, self.k_cache, self.v_cache, context.slot_mapping)
-    
-    # 2. Decode 阶段使用 flash_attn_with_kvcache
-    o = flash_attn_with_kvcache(
-        q.unsqueeze(1),  # [batch, 1, heads, dim]
-        self.k_cache,
-        self.v_cache,
-        cache_seqlens=context.context_lens,  # 每个序列的长度
-        block_table=context.block_tables,     # 批量 block_table
-        softmax_scale=self.scale,
-        causal=True
-    )
-    return o
-```
-
-**flash_attn_with_kvcache 的工作方式**：
-1. 根据 `block_tables` 定位每个 Sequence 的历史 KV 在 Cache 中的位置
-2. 根据 `cache_seqlens` 确定每个 Sequence 的有效长度
-3. 对每个新 Query token，与其对应的所有历史 KV 计算 Attention
-
-### 5.5 Step 4：后处理（Scheduler.postprocess）
-
-```python
-def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
-    for seq, token_id in zip(seqs, token_ids):
-        # 追加新 token
-        seq.append_token(token_id)
-        
-        # 检查终止条件
-        is_eos = not seq.ignore_eos and token_id == self.eos
-        is_max_tokens = seq.num_completion_tokens == seq.max_tokens
-        
-        if is_eos or is_max_tokens:
-            seq.status = SequenceStatus.FINISHED
-            self.block_manager.deallocate(seq)  # 释放所有 Block
-            self.running.remove(seq)
-```
-
-### 5.6 完整流程图与对比
+### 5.4 Prefill vs Decode 对比
 
 ```html
 <!DOCTYPE html>
@@ -1921,7 +1487,7 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
                 </td>
                 <td class="compare-decode">
                     <span class="compare-code">may_append(seq)</span><br>
-                    按需追加（可能 0 或 1 个 Block）
+                    按需追加（0 或 1 个 Block）
                 </td>
             </tr>
             <tr>
@@ -1939,7 +1505,7 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
                 <td><strong>slot_mapping</strong></td>
                 <td class="compare-prefill">
                     所有非缓存 token 的 slot<br>
-                    长度 = total_tokens
+                    长度 = 非缓存 token 总数
                 </td>
                 <td class="compare-decode">
                     每个 Sequence 1 个 slot<br>
@@ -1955,16 +1521,6 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
                 <td class="compare-decode">
                     <span class="compare-code">flash_attn_with_kvcache</span><br>
                     针对单 token + Cache 优化
-                </td>
-            </tr>
-            <tr>
-                <td><strong>Context 字段</strong></td>
-                <td class="compare-prefill">
-                    cu_seqlens_q/k, max_seqlen_q/k<br>
-                    block_tables（仅 Prefix Cache）
-                </td>
-                <td class="compare-decode">
-                    context_lens, block_tables
                 </td>
             </tr>
             <tr>
@@ -1996,23 +1552,11 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
 请求3: [System Prompt] + "Write code"
 ```
 
-如果每个请求都重新计算 System Prompt 的 KV Cache，会造成大量的计算和显存浪费。**Prefix Caching** 允许这些请求共享相同前缀的 Block。
+如果每个请求都重新计算 System Prompt 的 KV Cache，会造成大量计算和显存浪费。**Prefix Caching** 允许这些请求共享相同前缀的 Block。
 
 ### 6.2 Hash 计算与匹配
 
-nano-vllm 使用 **链式 hash** 来标识 Block 内容：
-
-```python
-@classmethod
-def compute_hash(cls, token_ids: list[int], prefix: int = -1):
-    h = xxhash.xxh64()
-    if prefix != -1:
-        h.update(prefix.to_bytes(8, "little"))  # 包含前缀 hash
-    h.update(np.array(token_ids).tobytes())
-    return h.intdigest()
-```
-
-**链式 hash 的原理**：
+nano-vllm 使用 **链式 hash** 标识 Block 内容：
 
 ```html
 <!DOCTYPE html>
@@ -2033,6 +1577,7 @@ def compute_hash(cls, token_ids: list[int], prefix: int = -1):
             display: flex;
             align-items: center;
             margin-bottom: 20px;
+            flex-wrap: wrap;
         }
         .hash-block {
             width: 120px;
@@ -2041,6 +1586,7 @@ def compute_hash(cls, token_ids: list[int], prefix: int = -1):
             border-radius: 8px;
             text-align: center;
             margin-right: 15px;
+            margin-bottom: 10px;
         }
         .hash-block-title {
             font-weight: bold;
@@ -2071,11 +1617,6 @@ def compute_hash(cls, token_ids: list[int], prefix: int = -1):
             border-radius: 5px;
             font-size: 12px;
         }
-        .hash-note {
-            margin-top: 15px;
-            font-size: 11px;
-            color: #666;
-        }
     </style>
 </head>
 <body>
@@ -2103,7 +1644,7 @@ def compute_hash(cls, token_ids: list[int], prefix: int = -1):
             <div class="hash-arrow">→</div>
             <div class="hash-block" style="background: #FFF9C4; border-style: dashed;">
                 <div class="hash-block-title">Block 3</div>
-                <div class="hash-content">tokens: [t768-t800]</div>
+                <div class="hash-content">[t768-t800]</div>
                 <div class="hash-value">h3 = -1 (未满)</div>
             </div>
         </div>
@@ -2111,62 +1652,18 @@ def compute_hash(cls, token_ids: list[int], prefix: int = -1):
         <div class="hash-formula">
             <strong>计算规则：</strong><br><br>
             • Block 0: h₀ = xxhash(tokens₀)<br>
-            • Block n: hₙ = xxhash(hₙ₋₁ || tokensₙ)<br>
-            • 未填满的 Block: hash = -1（不参与缓存）
-        </div>
-        
-        <div class="hash-note">
-            <strong>为什么需要链式 hash？</strong><br>
-            确保只有<strong>完全相同的前缀</strong>才能匹配。即使 Block 2 的 tokens 相同，
-            如果 Block 0 或 Block 1 不同，h2 也会不同。
+            • Block n: hₙ = xxhash(hₙ₋₁ || tokensₙ) — 包含前缀 hash<br>
+            • 未填满的 Block: hash = -1，不参与缓存<br><br>
+            <strong>关键特性：</strong>即使两个 Sequence 的 Block 2 内容相同，如果 Block 0 或 Block 1 不同，h2 也会不同
         </div>
     </div>
 </body>
 </html>
 ```
 
-**双重校验的必要性**：
+**双重校验**：仅 hash 匹配不够，还需校验 `token_ids` 内容，防止 hash 碰撞或 Block 被覆写。
 
-```python
-# 仅 hash 匹配不够，还需校验内容
-if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
-    cache_miss = True
-```
-
-原因：
-1. **Hash 碰撞**：xxhash 碰撞概率极低但不为零
-2. **Block 被覆写**：Block 回收后重新分配，旧的 hash→block_id 映射可能未清除
-
-### 6.3 在 Prefill 流程中的体现
-
-当新请求的前缀与已有 Block 匹配时：
-
-```python
-def allocate(self, seq: Sequence):
-    for i in range(seq.num_blocks):
-        token_ids = seq.block(i)
-        h = self.compute_hash(token_ids, h) if len(token_ids) == self.block_size else -1
-        block_id = self.hash_to_block_id.get(h, -1)
-        
-        if block_id != -1 and self.blocks[block_id].token_ids == token_ids:
-            # Cache Hit!
-            seq.num_cached_tokens += self.block_size
-            self.blocks[block_id].ref_count += 1
-            # 不需要从 free_block_ids 分配
-        else:
-            # Cache Miss
-            cache_miss = True
-            # 从 free_block_ids 分配新 Block
-```
-
-**后续影响**：
-
-1. `seq.num_cached_tokens` 累加了缓存命中的 token 数
-2. `prepare_prefill` 中 `input_ids` 只包含 `seq[seq.num_cached_tokens:]`
-3. `slot_mapping` 只为非缓存 token 生成
-4. Attention 计算时通过 `block_tables` 从 Cache 读取历史 KV
-
-### 6.4 Block 共享与引用计数
+### 6.3 Block 共享与引用计数
 
 ```html
 <!DOCTYPE html>
@@ -2244,205 +1741,22 @@ def allocate(self, seq: Sequence):
             </div>
             
             <div class="ref-event">
-                <div class="ref-event-title">T3: Sequence C 到达（相同 System Prompt）</div>
-                <div class="ref-event-detail">
-                    继续复用 Block 5
-                    <span class="ref-block-state" style="background: #FFCCBC;">Block 5: ref_count = 3</span>
-                </div>
-            </div>
-            
-            <div class="ref-event">
-                <div class="ref-event-title">T4: Sequence A 完成</div>
+                <div class="ref-event-title">T3: Sequence A 完成</div>
                 <div class="ref-event-detail">
                     调用 deallocate(A)，Block 5 的 ref_count 减 1
-                    <span class="ref-block-state" style="background: #FFF9C4;">Block 5: ref_count = 2</span>
-                    <br><small>Block 5 不会被释放，因为 ref_count > 0</small>
+                    <span class="ref-block-state" style="background: #C8E6C9;">Block 5: ref_count = 1</span>
+                    <br><small>Block 5 不释放，因为 B 还在使用</small>
                 </div>
             </div>
             
             <div class="ref-event">
-                <div class="ref-event-title">T5: Sequence B, C 都完成</div>
+                <div class="ref-event-title">T4: Sequence B 完成</div>
                 <div class="ref-event-detail">
                     ref_count 降为 0，Block 5 归还到 free_block_ids
-                    <span class="ref-block-state" style="background: #E0E0E0;">Block 5: ref_count = 0 (freed)</span>
-                    <br><small>但 hash→block_id 映射保留，下次可能命中</small>
+                    <span class="ref-block-state" style="background: #E0E0E0;">Block 5: ref_count = 0</span>
+                    <br><small>hash 映射保留，下次可能命中</small>
                 </div>
             </div>
-        </div>
-    </div>
-</body>
-</html>
-```
-
-### 6.5 示例演示
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .pc-demo-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .pc-demo-title {
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 25px;
-        }
-        .pc-demo-seq {
-            margin-bottom: 30px;
-            padding: 20px;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-        }
-        .pc-demo-seq-title {
-            font-weight: bold;
-            margin-bottom: 15px;
-            font-size: 14px;
-        }
-        .pc-demo-blocks {
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-        .pc-demo-block {
-            width: 100px;
-            padding: 10px;
-            border: 2px solid #333;
-            border-radius: 6px;
-            text-align: center;
-            font-size: 11px;
-        }
-        .pc-demo-shared { background: #C8E6C9; border-color: #4CAF50; }
-        .pc-demo-unique { background: #BBDEFB; }
-        .pc-demo-arrow {
-            font-size: 16px;
-            color: #4CAF50;
-        }
-        .pc-demo-status {
-            font-size: 10px;
-            margin-top: 5px;
-            padding: 2px 5px;
-            border-radius: 3px;
-        }
-        .pc-demo-physical {
-            margin-top: 25px;
-            padding: 15px;
-            background: #FAFAFA;
-            border-radius: 5px;
-        }
-        .pc-demo-physical-title {
-            font-weight: bold;
-            margin-bottom: 10px;
-            font-size: 13px;
-        }
-        .pc-demo-physical-blocks {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 5px;
-        }
-        .pc-demo-physical-block {
-            width: 50px;
-            height: 40px;
-            border: 1px solid #999;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            font-size: 10px;
-            border-radius: 3px;
-        }
-        .pc-demo-summary {
-            margin-top: 20px;
-            padding: 15px;
-            background: #E3F2FD;
-            border-radius: 5px;
-            font-size: 13px;
-        }
-    </style>
-</head>
-<body>
-    <div class="pc-demo-container">
-        <div class="pc-demo-title">Prefix Caching 完整示例</div>
-        
-        <div class="pc-demo-seq">
-            <div class="pc-demo-seq-title">Sequence 1: "You are a helpful assistant." + "What is AI?"</div>
-            <div class="pc-demo-blocks">
-                <div class="pc-demo-block pc-demo-shared">
-                    Block 0<br>
-                    "You are a..."<br>
-                    <span class="pc-demo-status" style="background: #A5D6A7;">Physical: 5</span>
-                </div>
-                <div class="pc-demo-block pc-demo-shared">
-                    Block 1<br>
-                    "...helpful..."<br>
-                    <span class="pc-demo-status" style="background: #A5D6A7;">Physical: 8</span>
-                </div>
-                <div class="pc-demo-block pc-demo-unique">
-                    Block 2<br>
-                    "What is AI?"<br>
-                    <span class="pc-demo-status" style="background: #90CAF9;">Physical: 3</span>
-                </div>
-            </div>
-            <div style="font-size: 11px; color: #666; margin-top: 10px;">
-                block_table = [5, 8, 3], num_cached_tokens = 0（首次请求，无缓存）
-            </div>
-        </div>
-        
-        <div class="pc-demo-seq">
-            <div class="pc-demo-seq-title">Sequence 2: "You are a helpful assistant." + "Explain ML"（稍后到达）</div>
-            <div class="pc-demo-blocks">
-                <div class="pc-demo-block pc-demo-shared">
-                    Block 0<br>
-                    "You are a..."<br>
-                    <span class="pc-demo-status" style="background: #A5D6A7;">Physical: 5 ✓</span>
-                </div>
-                <span class="pc-demo-arrow">← 缓存命中!</span>
-                <div class="pc-demo-block pc-demo-shared">
-                    Block 1<br>
-                    "...helpful..."<br>
-                    <span class="pc-demo-status" style="background: #A5D6A7;">Physical: 8 ✓</span>
-                </div>
-                <span class="pc-demo-arrow">← 缓存命中!</span>
-                <div class="pc-demo-block pc-demo-unique">
-                    Block 2<br>
-                    "Explain ML"<br>
-                    <span class="pc-demo-status" style="background: #90CAF9;">Physical: 12</span>
-                </div>
-            </div>
-            <div style="font-size: 11px; color: #666; margin-top: 10px;">
-                block_table = [5, 8, 12], num_cached_tokens = 512（2个Block缓存命中）
-            </div>
-        </div>
-        
-        <div class="pc-demo-physical">
-            <div class="pc-demo-physical-title">物理 Block 状态：</div>
-            <div class="pc-demo-physical-blocks">
-                <div class="pc-demo-physical-block" style="background: #eee;">0<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">1<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">2<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #BBDEFB;">3<br>ref=1</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">4<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #C8E6C9; border: 2px solid #4CAF50;">5<br>ref=2</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">6<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">7<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #C8E6C9; border: 2px solid #4CAF50;">8<br>ref=2</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">9<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">10<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #eee;">11<br>ref=0</div>
-                <div class="pc-demo-physical-block" style="background: #BBDEFB;">12<br>ref=1</div>
-            </div>
-        </div>
-        
-        <div class="pc-demo-summary">
-            <strong>收益分析：</strong><br><br>
-            • Sequence 2 的 Prefill：只需计算 "Explain ML" 部分（约 256 tokens）<br>
-            • 节省计算：512 tokens 的 KV 计算（2 个 Block）<br>
-            • 节省显存：2 个 Block × 29.36 MB ≈ 59 MB<br>
-            • 如果有 100 个类似请求，总节省约 5.9 GB 显存
         </div>
     </div>
 </body>
@@ -2453,187 +1767,33 @@ def allocate(self, seq: Sequence):
 
 ## 七、抢占与恢复机制
 
-### 7.1 抢占触发条件
+### 7.1 抢占触发与处理
 
 当 Decode 阶段需要新 Block 但空闲池已空时，触发抢占：
 
 ```python
 while not self.block_manager.can_append(seq):
     if self.running:
-        self.preempt(self.running.pop())  # 抢占
+        self.preempt(self.running.pop())  # 抢占最后进入的（LIFO）
     else:
         self.preempt(seq)
         break
 ```
 
-### 7.2 抢占策略
+**LIFO 策略的原因**：
+- 后进入的请求生成的 token 更少，重新计算代价更小
+- 先进入的请求接近完成，应优先保护
 
-nano-vllm 采用 **LIFO（后进先出）** 策略：抢占最后进入 running 队列的请求。
-
-**选择 LIFO 的原因**：
-1. 后进入的请求生成的 token 更少，重新计算代价更小
-2. 先进入的请求接近完成，应优先保护
-3. 实现简单：`running.pop()` 即可
-
-### 7.3 抢占处理流程
+### 7.2 抢占处理流程
 
 ```python
 def preempt(self, seq: Sequence):
-    # 1. 状态回退
-    seq.status = SequenceStatus.WAITING
-    
-    # 2. 释放所有 Block
-    self.block_manager.deallocate(seq)
-    
-    # 3. 放回等待队列头部（优先恢复）
-    self.waiting.appendleft(seq)
+    seq.status = SequenceStatus.WAITING      # 状态回退
+    self.block_manager.deallocate(seq)       # 释放所有 Block
+    self.waiting.appendleft(seq)              # 放回等待队列头部
 ```
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .preempt-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .preempt-title {
-            font-size: 15px;
-            font-weight: bold;
-            margin-bottom: 25px;
-        }
-        .preempt-step {
-            display: flex;
-            margin-bottom: 20px;
-        }
-        .preempt-num {
-            width: 30px;
-            height: 30px;
-            background: #F44336;
-            color: white;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            margin-right: 15px;
-            flex-shrink: 0;
-        }
-        .preempt-content {
-            flex: 1;
-        }
-        .preempt-action {
-            font-weight: bold;
-            margin-bottom: 8px;
-        }
-        .preempt-detail {
-            font-size: 12px;
-            color: #666;
-            padding: 10px;
-            background: #FFEBEE;
-            border-radius: 5px;
-        }
-        .preempt-queue {
-            display: flex;
-            align-items: center;
-            margin-top: 25px;
-            padding: 15px;
-            background: #FAFAFA;
-            border-radius: 5px;
-        }
-        .preempt-queue-title {
-            width: 80px;
-            font-weight: bold;
-            font-size: 12px;
-        }
-        .preempt-queue-item {
-            padding: 8px 15px;
-            margin-right: 8px;
-            border-radius: 5px;
-            font-size: 12px;
-        }
-    </style>
-</head>
-<body>
-    <div class="preempt-container">
-        <div class="preempt-title">抢占处理流程</div>
-        
-        <div class="preempt-step">
-            <div class="preempt-num">1</div>
-            <div class="preempt-content">
-                <div class="preempt-action">检测资源不足</div>
-                <div class="preempt-detail">
-                    can_append(seq) 返回 False<br>
-                    free_block_ids 为空，无法分配新 Block
-                </div>
-            </div>
-        </div>
-        
-        <div class="preempt-step">
-            <div class="preempt-num">2</div>
-            <div class="preempt-content">
-                <div class="preempt-action">选择抢占目标</div>
-                <div class="preempt-detail">
-                    running.pop() — 选择最后进入的 Sequence<br>
-                    例如：Seq C 是最后加入的，被选中抢占
-                </div>
-            </div>
-        </div>
-        
-        <div class="preempt-step">
-            <div class="preempt-num">3</div>
-            <div class="preempt-content">
-                <div class="preempt-action">释放资源</div>
-                <div class="preempt-detail">
-                    block_manager.deallocate(seq_c)<br>
-                    Seq C 的所有 Block 归还到 free_block_ids
-                </div>
-            </div>
-        </div>
-        
-        <div class="preempt-step">
-            <div class="preempt-num">4</div>
-            <div class="preempt-content">
-                <div class="preempt-action">状态回退</div>
-                <div class="preempt-detail">
-                    seq_c.status = WAITING<br>
-                    waiting.appendleft(seq_c) — 放到等待队列头部
-                </div>
-            </div>
-        </div>
-        
-        <div class="preempt-queue">
-            <div class="preempt-queue-title">抢占前：</div>
-            <div class="preempt-queue-item" style="background: #C8E6C9;">waiting: []</div>
-            <div class="preempt-queue-item" style="background: #BBDEFB;">running: [A, B, C]</div>
-        </div>
-        
-        <div class="preempt-queue">
-            <div class="preempt-queue-title">抢占后：</div>
-            <div class="preempt-queue-item" style="background: #FFCDD2;">waiting: [C]</div>
-            <div class="preempt-queue-item" style="background: #BBDEFB;">running: [A, B]</div>
-        </div>
-    </div>
-</body>
-</html>
-```
-
-### 7.4 恢复时的 Prefix Caching
-
-被抢占的 Sequence 在恢复时会经历完整的 `allocate` 流程：
-
-```python
-# 下一次调度时
-if self.block_manager.can_allocate(seq_c):
-    self.block_manager.allocate(seq_c)  # 可能命中自己之前的缓存!
-```
-
-**有趣的情况**：
-- Seq C 被抢占前已生成部分 token
-- 其 Block 被释放，但 `hash_to_block_id` 映射可能保留（如果没被覆写）
-- 恢复时 `allocate` 可能命中这些缓存，减少重新计算的代价
+**恢复时的 Prefix Caching**：被抢占的 Sequence 恢复时会经历完整的 `allocate` 流程，可能命中自己之前的缓存（如果未被覆写）。
 
 ---
 
@@ -2644,175 +1804,59 @@ if self.block_manager.can_allocate(seq_c):
 ```python
 @dataclass
 class Config:
-    model: str                              # 模型路径
-    max_num_batched_tokens: int = 16384     # 单次迭代最大 token 数
-    max_num_seqs: int = 512                 # 最大并发序列数
-    max_model_len: int = 4096               # 最大序列长度
+    kvcache_block_size: int = 256           # Block 大小
     gpu_memory_utilization: float = 0.9     # GPU 显存使用比例
-    tensor_parallel_size: int = 1           # 张量并行度
-    enforce_eager: bool = False             # 禁用 CUDA Graph
-    kvcache_block_size: int = 256           # Block 大小（token 数）
-    num_kvcache_blocks: int = -1            # Block 数量（自动计算）
+    max_num_seqs: int = 512                 # 最大并发序列数
+    max_num_batched_tokens: int = 16384     # 单次迭代最大 token 数
 ```
-
-**`kvcache_block_size = 256` 的选择理由**：
-- 与 CUDA warp size（32）倍数对齐，利于 GPU 计算效率
-- 足够大以减少 Block 管理开销和 hash 计算频率
-- 256 tokens × 多层 × 多头的矩阵尺寸适合 Tensor Core
 
 ### 8.2 Block 数量估算
 
-```python
-# 单个 Block 的显存占用
-block_bytes = (2 *                              # K + V
-               hf_config.num_hidden_layers *    # 层数
-               block_size *                     # 256
-               num_kv_heads *                   # KV 头数
-               hf_config.head_dim *             # 头维度
-               hf_config.torch_dtype.itemsize)  # 数据类型大小
-
-# 可用显存
-available = total_gpu_memory * gpu_memory_utilization - model_weights - activation_peak
-
-# Block 数量
-num_kvcache_blocks = available // block_bytes
+```
+block_bytes = 2 × num_layers × block_size × num_kv_heads × head_dim × dtype_size
+num_blocks = available_memory / block_bytes
 ```
 
-**Qwen3-0.6B 估算示例**：
-- 参数：28 层，8 KV 头，128 维，bf16
+**Qwen3-0.6B 示例**：
 - block_bytes = 2 × 28 × 256 × 8 × 128 × 2 = **29.36 MB**
-- 假设可用显存 4.6 GB → num_blocks ≈ **160**
-- 可支持的最大 token 数：160 × 256 = **40,960 tokens**
+- 可用显存 4.6 GB → num_blocks ≈ **160**
 
-### 8.3 block_size 选择的权衡
+### 8.3 block_size 选择权衡
 
 | block_size | 优点 | 缺点 |
 |------------|------|------|
-| **大（256）** | Block 管理开销低<br>hash 计算频率低<br>flash_attn 效率高 | 内部碎片大（最后一个 Block 浪费）<br>Prefix Cache 粒度粗 |
-| **小（16/32）** | 内部碎片小<br>Prefix Cache 细粒度<br>更灵活的内存管理 | 管理开销高<br>hash 计算频繁<br>block_table 更长 |
-
-nano-vllm 固定使用 256，适合长序列、大 batch 场景。对于短对话、多轮交互场景，较小的 block_size 可能更优。
+| 大（256） | 管理开销低，Kernel 效率高 | 内部碎片大，缓存粒度粗 |
+| 小（16/32） | 内部碎片小，缓存粒度细 | 管理开销高，hash 计算频繁 |
 
 ---
 
 ## 九、总结与思考
 
-### 9.1 核心要点回顾
+### 9.1 核心要点
 
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        .summary-container {
-            background-color: white;
-            padding: 30px;
-            font-family: 'Segoe UI', Arial, sans-serif;
-        }
-        .summary-title {
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 25px;
-        }
-        .summary-section {
-            margin-bottom: 25px;
-        }
-        .summary-section-title {
-            font-weight: bold;
-            margin-bottom: 10px;
-            padding-bottom: 5px;
-            border-bottom: 2px solid #2196F3;
-            display: inline-block;
-        }
-        .summary-points {
-            padding-left: 20px;
-        }
-        .summary-point {
-            margin-bottom: 8px;
-            font-size: 13px;
-            line-height: 1.6;
-        }
-        .summary-highlight {
-            background: #E3F2FD;
-            padding: 2px 6px;
-            border-radius: 3px;
-        }
-    </style>
-</head>
-<body>
-    <div class="summary-container">
-        <div class="summary-title">核心要点回顾</div>
-        
-        <div class="summary-section">
-            <div class="summary-section-title">Block / BlockManager / Sequence 三者关系</div>
-            <div class="summary-points">
-                <div class="summary-point">• <span class="summary-highlight">Block</span> 是物理存储单元，由 block_id 唯一标识，存储固定数量 token 的 KV Cache</div>
-                <div class="summary-point">• <span class="summary-highlight">BlockManager</span> 管理 Block 的生命周期：分配、追加、释放、缓存查找</div>
-                <div class="summary-point">• <span class="summary-highlight">Sequence</span> 持有 block_table，记录逻辑 Block 到物理 Block 的映射</div>
-            </div>
-        </div>
-        
-        <div class="summary-section">
-            <div class="summary-section-title">Prefill 与 Decode 的关键差异</div>
-            <div class="summary-points">
-                <div class="summary-point">• Prefill：一次性处理整个 prompt，使用 <span class="summary-highlight">allocate</span> 分配多个 Block</div>
-                <div class="summary-point">• Decode：逐 token 生成，使用 <span class="summary-highlight">may_append</span> 按需追加 Block</div>
-                <div class="summary-point">• 资源不足时：Prefill 等待，Decode 抢占</div>
-            </div>
-        </div>
-        
-        <div class="summary-section">
-            <div class="summary-section-title">Prefix Caching 的实现方式</div>
-            <div class="summary-points">
-                <div class="summary-point">• 使用 <span class="summary-highlight">链式 xxhash</span> 标识 Block 内容，确保前缀完全相同才能匹配</div>
-                <div class="summary-point">• <span class="summary-highlight">ref_count</span> 实现 Block 共享，多个 Sequence 可复用同一 Block</div>
-                <div class="summary-point">• 只有填满的 Block 才参与缓存，未填满的 Block hash = -1</div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-```
+1. **Block / BlockManager / Sequence 三者关系**：
+   - Block 是物理存储单元
+   - BlockManager 管理 Block 生命周期
+   - Sequence 持有 block_table 映射
 
-### 9.2 nano-vllm vs vLLM
+2. **Prefill 与 Decode 差异**：
+   - Prefill：allocate 分配多个 Block，flash_attn_varlen_func
+   - Decode：may_append 按需追加，flash_attn_with_kvcache
 
-| 特性 | nano-vllm | vLLM |
-|------|-----------|------|
-| 代码量 | ~1,200 行 | ~100,000+ 行 |
-| Copy-on-Write | ❌ 不支持 | ✅ 支持 |
-| Beam Search Block 分叉 | ❌ 不支持 | ✅ 支持 |
-| block_size | 固定 256 | 可配置 |
-| 抢占策略 | 简单 LIFO | 多种策略可选 |
-| Prefix Caching | 基础实现 | 更完善的 LRU 淘汰 |
-| 分布式支持 | 基础 TP | 完整 TP/PP |
+3. **Prefix Caching 实现**：
+   - 链式 xxhash 标识内容
+   - ref_count 实现共享
+   - 只有填满的 Block 参与缓存
 
-**nano-vllm 的定位**：教学和原型验证，通过简化设计展示 PagedAttention 的核心思想。
+### 9.2 思考题
 
-### 9.3 思考题
+**Q1：部分重叠的 prompt 能否共享 Block？**
 
-**Q1：如果两个请求的 prompt 有部分重叠但不完全相同，Prefix Caching 能生效吗？**
-
-**答案**：只有**前缀完全相同的完整 Block** 才能共享。
-
-例如：
-- Seq1: "Hello world, how are you?" (假设占 1.5 个 Block)
-- Seq2: "Hello world, what's up?" (同样 1.5 个 Block)
-
-如果第一个 Block 内容完全相同，可以共享 Block 0。但由于后续内容不同，Block 1 的 hash 会因为链式传递而不同（即使 Block 1 的部分内容相同），无法共享。
+只有**前缀完全相同的完整 Block** 才能共享。部分重叠但不完全相同的 Block 无法共享，因为链式 hash 会传递差异。
 
 **Q2：ref_count > 1 的 Block 如何处理写入？**
 
-**答案**：在 nano-vllm 中，**共享 Block 只包含已填满的历史 token**，新 token 总是写入最后一个 Block（该 Block 的 hash = -1，不参与共享）。因此不会出现写入共享 Block 的情况。
-
-如果需要支持 Beam Search 等场景（多个候选共享前缀，然后分叉），则需要实现 **Copy-on-Write**：当要写入 ref_count > 1 的 Block 时，先复制一份独立的 Block。
-
-### 9.4 下期预告
-
-**主题三：Scheduler 的 Continuous Batching 与迭代级调度**
-- 为什么需要 Iteration-level 调度
-- Prefill 和 Decode 的优先级权衡
-- CUDA Graph 对调度的影响
-- 吞吐量与延迟的 trade-off
+nano-vllm 中，共享 Block 只包含已填满的历史 token，新 token 总是写入最后一个 Block（hash = -1，不参与共享），因此不会写入共享 Block。
 
 ---
 
@@ -2821,19 +1865,13 @@ nano-vllm 固定使用 256，适合长序列、大 batch 场景。对于短对�
 | 功能点 | 文件 | 关键方法/类 |
 |--------|------|-------------|
 | Block 定义 | `engine/block_manager.py` | `Block` |
-| Block 分配 | `engine/block_manager.py` | `BlockManager.allocate()` |
-| Block 追加 | `engine/block_manager.py` | `BlockManager.may_append()` |
-| Block 回收 | `engine/block_manager.py` | `BlockManager.deallocate()` |
-| Prefix Cache hash | `engine/block_manager.py` | `BlockManager.compute_hash()` |
+| Block 管理 | `engine/block_manager.py` | `BlockManager` |
 | Sequence 定义 | `engine/sequence.py` | `Sequence` |
-| block_table | `engine/sequence.py` | `Sequence.block_table` |
-| KV Cache 分配 | `engine/model_runner.py` | `ModelRunner.allocate_kv_cache()` |
-| Prefill 准备 | `engine/model_runner.py` | `ModelRunner.prepare_prefill()` |
-| Decode 准备 | `engine/model_runner.py` | `ModelRunner.prepare_decode()` |
+| KV Cache 分配 | `engine/model_runner.py` | `allocate_kv_cache()` |
+| Prefill 准备 | `engine/model_runner.py` | `prepare_prefill()` |
+| Decode 准备 | `engine/model_runner.py` | `prepare_decode()` |
 | KV Cache 写入 | `layers/attention.py` | `store_kvcache_kernel()` |
 | Attention 计算 | `layers/attention.py` | `Attention.forward()` |
-| 运行时上下文 | `utils/context.py` | `Context`, `set_context()`, `get_context()` |
+| 运行时上下文 | `utils/context.py` | `Context`, `set_context()` |
 | 调度逻辑 | `engine/scheduler.py` | `Scheduler.schedule()` |
 | 抢占处理 | `engine/scheduler.py` | `Scheduler.preempt()` |
-| 后处理 | `engine/scheduler.py` | `Scheduler.postprocess()` |
-| 配置参数 | `config.py` | `Config` |

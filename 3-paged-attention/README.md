@@ -25,12 +25,12 @@ KV Cache Size = 2 × num_layers × seq_len × num_kv_heads × head_dim × dtype_
 
 PagedAttention 借鉴了操作系统虚拟内存管理的 **分页机制**：
 
-| 操作系统概念 | PagedAttention 类比 |
-|-------------|-------------------|
-| 页（Page） | Block（固定大小的 KV Cache 块） |
+| 操作系统概念       | PagedAttention 类比                        |
+| ------------------ | ------------------------------------------ |
+| 页（Page）         | Block（固定大小的 KV Cache 块）            |
 | 页表（Page Table） | Block Table（逻辑位置到物理 Block 的映射） |
-| slot | token 级别的物理位置映射 |
-| 进程（Process） | Sequence（一个推理请求） |
+| slot               | token 级别的物理位置映射                   |
+| 进程（Process）    | Sequence（一个推理请求）                   |
 
 核心优势：
 - **按需分配**：只为实际生成的 token 分配 Block
@@ -913,16 +913,104 @@ class Scheduler:
 
 ---
 
-## 四、Prefill 流程全解析
+## 四、Prefix Caching 机制详解
 
-### 4.1 流程概述
+### 4.1 设计动机
+
+在实际应用中，大量请求共享相同的前缀（如 System Prompt）：
+
+```
+请求1: [System Prompt] + "What is AI?"
+请求2: [System Prompt] + "Explain ML"
+请求3: [System Prompt] + "Write code"
+```
+
+如果每个请求都重新计算 System Prompt 的 KV Cache，会浪费大量计算和显存。**Prefix Caching** 允许这些请求共享相同前缀的 Block。
+
+### 4.2 链式 Hash 计算
+
+nano-vllm 使用 **链式 hash** 确保只有完全相同的前缀才能匹配。
+
+```python
+# ===== BlockManager.compute_hash() =====
+
+@classmethod
+def compute_hash(cls, token_ids: list[int], prefix: int = -1):
+    """
+    计算 Block 内容的 hash 值。
+    
+    关键：当前 Block 的 hash 依赖于前缀 Block 的 hash，
+    这样即使两个 Block 内容相同，如果前缀不同，hash 也不同。
+    """
+    h = xxhash.xxh64()
+    if prefix != -1:
+        # 将前缀 hash 纳入计算
+        h.update(prefix.to_bytes(8, "little"))
+    h.update(np.array(token_ids).tobytes())
+    return h.intdigest()
+```
+
+**链式 Hash 示意图**：
+
+![图 18](../.assets/84a91c45b593821e028c036bb6450ee30e88acdc88166066a47750a402307207.png)  
+
+### 4.3 缓存匹配与复用
+
+在 `allocate` 中，对每个 Block 进行缓存查找和双重校验：
+
+```python
+# ===== allocate() 中的缓存匹配逻辑 =====
+
+for i in range(seq.num_blocks):
+    token_ids = seq.block(i)
+    
+    # 只有完整 Block 才计算 hash
+    if len(token_ids) == self.block_size:
+        h = self.compute_hash(token_ids, h)  # h 是前一个 Block 的 hash
+    else:
+        h = -1
+    
+    # 查找缓存
+    block_id = self.hash_to_block_id.get(h, -1)
+    
+    # 👇 双重校验：hash 匹配 + 内容匹配
+    if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
+        cache_miss = True  # Miss 后，后续全部 Miss
+    
+    if not cache_miss:
+        # Cache Hit
+        seq.num_cached_tokens += self.block_size
+        block = self.blocks[block_id]
+        block.ref_count += 1  # 引用计数 +1
+        # 不需要从 free_block_ids 分配
+    else:
+        # Cache Miss
+        block_id = self.free_block_ids[0]
+        block = self._allocate_block(block_id)
+```
+
+**为什么需要双重校验？**
+1. **Hash 碰撞**：xxhash 碰撞概率极低但不为零
+2. **Block 被覆写**：Block 回收后重新分配给新内容，旧的 `hash_to_block_id` 映射可能未清除
+
+**引用计数机制**：
+
+![图 19](../.assets/9f0895c05713900fce7eafc53c7dea979847020407f94899fb89e37c13d53f44.png)  
+
+### 4.4 完整示例：两个请求共享前缀
+
+![图 20](../.assets/838198e5e32a4a8b1c1a33cd79e22eb111fdb1db5ed341ca6ef4cd4cc6eafd7d.png)  
+
+## 五、Prefill 流程全解析
+
+### 5.1 流程概述
 
 Prefill 阶段处理新请求的 prompt，一次性计算所有 prompt token 的 KV Cache 并生成第一个 token。
 
 ![图 5](../.assets/2b13dc27a908104b58e2fa16e5e677a72697d155eb2489b872bb2f9265b4e89b.png)  
 
 
-### 4.2 Step 1：调度器选择请求
+### 5.2 Step 1：调度器选择请求
 
 Scheduler 从 waiting 队列中取出新请求，检查资源后调用 BlockManager 分配 Block。
 
@@ -967,7 +1055,7 @@ if scheduled_seqs:
 - `allocate(seq)` 执行实际分配，内部会处理 Prefix Caching
 - `num_cached_tokens` 是 Prefix Cache 命中的 token 数，由 `allocate` 内部设置
 
-### 4.3 Step 2：BlockManager 分配 Block
+### 5.3 Step 2：BlockManager 分配 Block
 
 这是 Prefill 阶段最核心的步骤，包含完整的 Prefix Caching 逻辑。
 
@@ -1023,7 +1111,7 @@ def allocate(self, seq: Sequence):
 
 ![图 7](../.assets/73b70477c95c94f4e592137d8c5e70320b42b326446c46d790289fa81f6cdf62.png)  
 
-### 4.4 Step 3：构造运行时上下文
+### 5.4 Step 3：构造运行时上下文
 
 ModelRunner 根据 block_table 和 num_cached_tokens 构造 Attention 所需的参数。
 
@@ -1102,7 +1190,7 @@ def prepare_prefill(self, seqs: list[Sequence]):
 ![图 9](../.assets/dfced6a7d5dc290e71969381453ed9bb8b8b626aca3883f75b687096fb9d5ce5.png)  
 
 
-### 4.5 Step 4：Attention 计算与 KV Cache 写入
+### 5.5 Step 4：Attention 计算与 KV Cache 写入
 
 Attention 层根据 Context 中的信息，写入 KV Cache 并执行注意力计算。
 
@@ -1217,7 +1305,7 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor,
 ![图 13](../.assets/81267e618a6e5e678ecf151ff77d50e1aff62f6926db8f2fe097e4f44f932b86.png)  
 
 
-### 4.6 Step 5：后处理
+### 5.6 Step 5：后处理
 
 采样生成 token 后，Scheduler 更新 Sequence 状态。
 
@@ -1249,16 +1337,16 @@ def postprocess(self, seqs: list[Sequence], token_ids: list[int]):
 
 ---
 
-## 五、Decode 流程全解析
+## 六、Decode 流程全解析
 
-### 5.1 流程概述
+### 6.1 流程概述
 
 Decode 阶段逐个生成 token，每次迭代只处理一个新 token，但可以批量处理多个 Sequence。
 
 ![图 14](../.assets/d59cadf2568903052fa3bc6fbdde4e55925c3a6fdb3fecb47b5b8c0dce600de6.png)  
 
 
-### 5.2 Step 1：调度与抢占
+### 6.2 Step 1：调度与抢占
 
 Decode 调度的核心是处理资源不足时的抢占逻辑。
 
@@ -1307,7 +1395,7 @@ def preempt(self, seq: Sequence):
     self.waiting.appendleft(seq)
 ```
 
-### 5.3 Step 2：按需追加 Block
+### 6.3 Step 2：按需追加 Block
 
 may_append 处理三种情况，确保有足够的槽位存放新 token。
 
@@ -1347,7 +1435,7 @@ def may_append(self, seq: Sequence):
 ![图 15](../.assets/59bbda88fa1eb374b5c026db53d9ee399f2cee23e4e9f4e0013fdab72007eebe.png)  
 
 
-### 5.4 Step 3：构造 Decode 上下文
+### 6.4 Step 3：构造 Decode 上下文
 
 Decode 阶段每个 Sequence 只有一个新 token，构造过程更简单。
 
@@ -1391,7 +1479,7 @@ def prepare_decode(self, seqs: list[Sequence]):
 
 ![图 16](../.assets/a811af35d7b8a8e2562b837e6666893503e7e7d093efb8cbae0a99d22634782c.png)  
 
-### 5.5 Step 4：Decode Attention 计算
+### 6.5 Step 4：Decode Attention 计算
 
 Decode 阶段使用 `flash_attn_with_kvcache`，专为单 token + Cache 场景优化。
 
@@ -1423,91 +1511,3 @@ def forward(self, q, k, v):
 ![图 17](../.assets/9d4eb1cfbe6d80f6ad847d23b684092d80a734991473e0b9bd80b0117d9d7f8d.png)  
 
 ---
-
-## 六、Prefix Caching 机制详解
-
-### 6.1 设计动机
-
-在实际应用中，大量请求共享相同的前缀（如 System Prompt）：
-
-```
-请求1: [System Prompt] + "What is AI?"
-请求2: [System Prompt] + "Explain ML"
-请求3: [System Prompt] + "Write code"
-```
-
-如果每个请求都重新计算 System Prompt 的 KV Cache，会浪费大量计算和显存。**Prefix Caching** 允许这些请求共享相同前缀的 Block。
-
-### 6.2 链式 Hash 计算
-
-nano-vllm 使用 **链式 hash** 确保只有完全相同的前缀才能匹配。
-
-```python
-# ===== BlockManager.compute_hash() =====
-
-@classmethod
-def compute_hash(cls, token_ids: list[int], prefix: int = -1):
-    """
-    计算 Block 内容的 hash 值。
-    
-    关键：当前 Block 的 hash 依赖于前缀 Block 的 hash，
-    这样即使两个 Block 内容相同，如果前缀不同，hash 也不同。
-    """
-    h = xxhash.xxh64()
-    if prefix != -1:
-        # 将前缀 hash 纳入计算
-        h.update(prefix.to_bytes(8, "little"))
-    h.update(np.array(token_ids).tobytes())
-    return h.intdigest()
-```
-
-**链式 Hash 示意图**：
-
-![图 18](../.assets/84a91c45b593821e028c036bb6450ee30e88acdc88166066a47750a402307207.png)  
-
-### 6.3 缓存匹配与复用
-
-在 `allocate` 中，对每个 Block 进行缓存查找和双重校验：
-
-```python
-# ===== allocate() 中的缓存匹配逻辑 =====
-
-for i in range(seq.num_blocks):
-    token_ids = seq.block(i)
-    
-    # 只有完整 Block 才计算 hash
-    if len(token_ids) == self.block_size:
-        h = self.compute_hash(token_ids, h)  # h 是前一个 Block 的 hash
-    else:
-        h = -1
-    
-    # 查找缓存
-    block_id = self.hash_to_block_id.get(h, -1)
-    
-    # 👇 双重校验：hash 匹配 + 内容匹配
-    if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
-        cache_miss = True  # Miss 后，后续全部 Miss
-    
-    if not cache_miss:
-        # Cache Hit
-        seq.num_cached_tokens += self.block_size
-        block = self.blocks[block_id]
-        block.ref_count += 1  # 引用计数 +1
-        # 不需要从 free_block_ids 分配
-    else:
-        # Cache Miss
-        block_id = self.free_block_ids[0]
-        block = self._allocate_block(block_id)
-```
-
-**为什么需要双重校验？**
-1. **Hash 碰撞**：xxhash 碰撞概率极低但不为零
-2. **Block 被覆写**：Block 回收后重新分配给新内容，旧的 `hash_to_block_id` 映射可能未清除
-
-**引用计数机制**：
-
-![图 19](../.assets/9f0895c05713900fce7eafc53c7dea979847020407f94899fb89e37c13d53f44.png)  
-
-### 6.4 完整示例：两个请求共享前缀
-
-![图 20](../.assets/838198e5e32a4a8b1c1a33cd79e22eb111fdb1db5ed341ca6ef4cd4cc6eafd7d.png)  
